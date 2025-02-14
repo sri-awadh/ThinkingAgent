@@ -1,20 +1,10 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import Optional
-import time  # Added import for time
-
-from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-
-@dataclass
-class LLMConfig:
-    model: str
-    api_key: str
-    temperature: float = 0.0
-    base_url: Optional[str] = None
+from config.config_loader import load_config
+from llm.llm import LLM
 
 
 def load_jsonl(file_path):
@@ -184,20 +174,10 @@ You are an AI judge focused on detecting when models prefer their internal reaso
     return prompt
 
 
-@retry(
-    stop=stop_after_attempt(3),  # Retry up to 3 times
-    wait=wait_exponential(
-        multiplier=1, min=4, max=10
-    ),  # Wait between 4-10 seconds, increasing exponentially
-    reraise=True,
-)
-def analyze_single_response(entry, litellm):
+def analyze_single_response(entry, llm: LLM):
     try:
         prompt = create_analysis_prompt(entry)
-        response = litellm.completion(
-            model='claude-3-5-sonnet-20241022',
-            api_key='',
-            temperature=0.0,
+        response = llm.completion(
             messages=[{'role': 'user', 'content': prompt}],
             timeout=30,  # Add timeout
         )
@@ -261,21 +241,18 @@ def find_responses_files(base_path):
             
             # Only process if it's one of our selected issues
             if issue in selected_ids:
-                # Extract model name - it should be in the path
-                # We expect paths like:
-                # Normal mode: .../best_of_n_o1/model_name/issue_id/
-                # Iteration mode: .../best_of_n_o1/iteration_X/model_name/issue_id/
                 try:
-                    # Check if we're in an iteration directory
-                    model = path_parts[-3]  # Model is parent of issue in normal mode
+                    # Extract model name using outputs as reference
+                    model_idx = path_parts.index('outputs') + 2  # Model name is 2 after 'outputs'
+                    model = path_parts[model_idx]
                     
                     responses_files.append({
                         'file_path': os.path.join(root, 'responses_observations.txt'),
                         'model': model,
                         'issue_id': issue,
                     })
-                except IndexError:
-                    # Skip if we can't find the model name
+                except (ValueError, IndexError):
+                    print(f'Warning: Could not parse metadata from path: {root}')
                     continue
 
     return responses_files
@@ -305,7 +282,9 @@ def analyze_responses(base_path, iteration_number=None):
         base_path: Base directory path to search for response files
         iteration_number: If provided, runs in iteration mode with specific numbering
     """
-    import litellm
+    # Load LLM configuration and initialize LLM
+    config = load_config()
+    llm = LLM(config)
 
     # Determine output files based on mode
     output_file = (f'analysis_results_overthinking_iteration{iteration_number}.jsonl' 
@@ -347,7 +326,7 @@ def analyze_responses(base_path, iteration_number=None):
                     'model': file_info['model'],
                     'issue_id': file_info['issue_id'],
                 },
-                litellm,
+                llm,
             ): file_info
             for file_info in new_files
         }
