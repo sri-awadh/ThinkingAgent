@@ -1,0 +1,104 @@
+diff --git a/astropy/coordinates/builtin_frames/itrs.py b/astropy/coordinates/builtin_frames/itrs.py
+index e121ec9064..71206e9ac6 100644
+--- a/astropy/coordinates/builtin_frames/itrs.py
++++ b/astropy/coordinates/builtin_frames/itrs.py
+@@ -36,3 +36,62 @@ class ITRS(BaseCoordinateFrame):
+
+ # Self-transform is in intermediate_rotation_transforms.py with all the other
+ # ITRS transforms
++
++import numpy as np
++from astropy import units as u
++from astropy.coordinates.matrix_utilities import rotation_matrix, matrix_transpose
++from astropy.coordinates.baseframe import frame_transform_graph
++from astropy.coordinates.transformations import FunctionTransformWithFiniteDifference
++from .altaz import AltAz
++from .hadec import HADec
++from .itrs import ITRS
++from .utils import PIOVER2
++
++def itrs_to_observed_mat(observed_frame):
++
++    lon, lat, height = observed_frame.location.to_geodetic('WGS84')
++    elong = lon.to_value(u.radian)
++
++    if isinstance(observed_frame, AltAz):
++        # form ITRS to AltAz matrix
++        elat = lat.to_value(u.radian)
++        # AltAz frame is left handed
++        minus_x = np.eye(3)
++        minus_x[0][0] = -1.0
++        mat = (minus_x
++               @ rotation_matrix(PIOVER2 - elat, 'y', unit=u.radian)
++               @ rotation_matrix(elong, 'z', unit=u.radian))
++
++    else:
++        # form ITRS to HADec matrix
++        # HADec frame is left handed
++        minus_y = np.eye(3)
++        minus_y[1][1] = -1.0
++        mat = (minus_y
++               @ rotation_matrix(elong, 'z', unit=u.radian))
++    return mat
++
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, ITRS, AltAz)
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, ITRS, HADec)
++def itrs_to_observed(itrs_coo, observed_frame):
++    # Trying to synchronize the obstimes here makes no sense. In fact,
++    # it's a real gotcha as doing an ITRS->ITRS transform references
++    # ITRS coordinates, which should be tied to the Earth, to the SSB.
++    # Instead, we treat ITRS coordinates as time invariant here.
++
++    # form the Topocentric ITRS position
++    topocentric_itrs_repr = (itrs_coo.cartesian
++                             - observed_frame.location.get_itrs().cartesian)
++    rep = topocentric_itrs_repr.transform(itrs_to_observed_mat(observed_frame))
++    return observed_frame.realize_frame(rep)
++
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, AltAz, ITRS)
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, HADec, ITRS)
++def observed_to_itrs(observed_coo, itrs_frame):
++
++    # form the Topocentric ITRS position
++    topocentric_itrs_repr = observed_coo.cartesian.transform(matrix_transpose(
++                            itrs_to_observed_mat(observed_coo)))
++    # form the Geocentric ITRS position
++    rep = topocentric_itrs_repr + observed_coo.location.get_itrs().cartesian
++    return itrs_frame.realize_frame(rep)
+diff --git a/test_transformations.log b/test_transformations.log
+new file mode 100644
+index 0000000000..c178b2a0f7
+--- /dev/null
++++ b/test_transformations.log
+@@ -0,0 +1,4 @@
++AltAz: <SkyCoord (AltAz: obstime=2023-01-01T00:00:00.000, location=(-2706174.84661108, -4261059.48929648, 3885725.49002361) m, pressure=0.0 hPa, temperature=0.0 deg_C, relative_humidity=0.0, obswl=1.0 micron): (az, alt, distance) in (deg, deg, m)
++    (359.9993688, -89.81378651, 6370154.78601752)>
++HADec: <SkyCoord (HADec: obstime=2023-01-01T00:00:00.000, location=(-2706174.84661108, -4261059.48929648, 3885725.49002361) m, pressure=0.0 hPa, temperature=0.0 deg_C, relative_humidity=0.0, obswl=1.0 micron): (ha, dec, distance) in (hourangle, deg, m)
++    (11.99999983, -37.58868651, 6370154.78601753)>
+diff --git a/test_transformations.py b/test_transformations.py
+new file mode 100644
+index 0000000000..1df9c3a112
+--- /dev/null
++++ b/test_transformations.py
+@@ -0,0 +1,20 @@
++import astropy.units as u
++from astropy.coordinates import ITRS, AltAz, HADec, EarthLocation, SkyCoord
++from astropy.time import Time
++
++# Define a location
++location = EarthLocation(lat=37.7749*u.deg, lon=-122.4194*u.deg, height=0*u.m)
++
++# Define a time
++obstime = Time('2023-01-01T00:00:00', scale='utc')
++
++# Define an ITRS coordinate
++itrs_coord = SkyCoord(x=1*u.m, y=2*u.m, z=3*u.m, frame=ITRS(obstime=obstime))
++
++# Transform to AltAz
++altaz_coord = itrs_coord.transform_to(AltAz(obstime=obstime, location=location))
++print(f"AltAz: {altaz_coord}")
++
++# Transform to HADec
++hadec_coord = itrs_coord.transform_to(HADec(obstime=obstime, location=location))
++print(f"HADec: {hadec_coord}")
+\ No newline at end of file

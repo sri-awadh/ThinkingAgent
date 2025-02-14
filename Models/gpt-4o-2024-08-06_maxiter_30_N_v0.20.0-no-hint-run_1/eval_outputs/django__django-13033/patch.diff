@@ -1,0 +1,88 @@
+diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py
+index d517d7269b..8e7a32e49e 100644
+--- a/django/db/models/fields/related.py
++++ b/django/db/models/fields/related.py
+@@ -669,7 +669,7 @@ class ForeignObject(RelatedField):
+
+     def get_joining_columns(self, reverse_join=False):
+         source = self.reverse_related_fields if reverse_join else self.related_fields
+-        return tuple((lhs_field.column, rhs_field.column) for lhs_field, rhs_field in source)
++        return tuple((lhs_field.column, rhs_field.column) for lhs_field, rhs_field in source if lhs_field != rhs_field)
+
+     def get_reverse_joining_columns(self):
+         return self.get_joining_columns(reverse_join=True)
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index abbb1e37cb..81cefa4285 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -277,12 +277,10 @@ class SQLCompiler:
+         can add aliases to clauses that do not yet have one, or it can
+         add totally new select clauses).
+         """
+-        if self.query.extra_order_by:
+-            ordering = self.query.extra_order_by
+-        elif not self.query.default_ordering:
+-            ordering = self.query.order_by
+-        elif self.query.order_by:
++        if self.query.order_by:
+             ordering = self.query.order_by
++        elif self.query.extra_order_by:
++            ordering = self.query.extra_order_by
+         elif self.query.get_meta().ordering:
+             ordering = self.query.get_meta().ordering
+             self._meta_ordering = ordering
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..a8ce74f5ac
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,49 @@
++from django.db import models
++from django.conf import settings
++from django.core.management import execute_from_command_line
++import os
++import django
++
++# Define the models as described in the PR
++define_models_code = '''
++class OneModel(models.Model):
++    class Meta:
++        ordering = ("-id",)
++    id = models.BigAutoField(primary_key=True)
++    root = models.ForeignKey("OneModel", on_delete=models.CASCADE, null=True)
++    oneval = models.BigIntegerField(null=True)
++
++class TwoModel(models.Model):
++    id = models.BigAutoField(primary_key=True)
++    record = models.ForeignKey(OneModel, on_delete=models.CASCADE)
++    twoval = models.BigIntegerField(null=True)
++'''
++
++# Configure Django settings for the script
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        '__main__',  # This allows the models to be recognized
++    ],
++)
++
++django.setup()
++
++# Create the models dynamically
++exec(define_models_code)
++
++# Create the database tables
++execute_from_command_line(['manage.py', 'migrate', '--run-syncdb'])
++
++# Reproduce the error
++qs = TwoModel.objects.filter(record__oneval__in=[1, 2, 3])
++qs = qs.order_by("record__root_id")
++print(qs.query)

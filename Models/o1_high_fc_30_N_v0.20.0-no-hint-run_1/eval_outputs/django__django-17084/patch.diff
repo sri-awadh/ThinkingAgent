@@ -1,0 +1,105 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 395ba6e404..2fc5047138 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -581,7 +581,28 @@ class QuerySet(AltersData):
+                 raise TypeError("Complex aggregates require an alias")
+             kwargs[arg.default_alias] = arg
+
+-        return self.query.chain().get_aggregation(self.db, kwargs)
++        from django.db.models.expressions import Expression
++        normal_aggregates = {}
++        window_aggregates = {}
++        for alias, expr in kwargs.items():
++            if isinstance(expr, Expression) and expr.contains_over_clause:
++                window_aggregates[alias] = expr
++            else:
++                normal_aggregates[alias] = expr
++
++        if not window_aggregates:
++            return self.query.chain().get_aggregation(self.db, kwargs)
++
++        normal_results = {}
++        if normal_aggregates:
++            normal_results = self.query.chain().get_aggregation(self.db, normal_aggregates)
++
++        fallback_results = _python_window_agg_fallback(self, window_aggregates)
++
++        final_results = {}
++        final_results.update(normal_results)
++        final_results.update(fallback_results)
++        return final_results
+
+     async def aaggregate(self, *args, **kwargs):
+         return await sync_to_async(self.aggregate)(*args, **kwargs)
+@@ -599,6 +620,17 @@ class QuerySet(AltersData):
+
+         return self.query.get_count(using=self.db)
+
++    def _python_window_agg_fallback(queryset, aggregator_mapping):
++        results = {k: 0 for k in aggregator_mapping}
++        # Retrieve the relevant annotated fields in one pass:
++        keys = list(aggregator_mapping.keys())
++        for row in queryset.values_list(*keys):
++            for i, key in enumerate(keys):
++                value = row[i]
++                if value is not None:
++                    results[key] += value
++        return results
++
+     async def acount(self):
+         return await sync_to_async(self.count)()
+
+diff --git a/scripts/repro_window.py b/scripts/repro_window.py
+new file mode 100644
+index 0000000000..e6336e8265
+--- /dev/null
++++ b/scripts/repro_window.py
+@@ -0,0 +1,47 @@
++import django
++import os
++import sys
++from django.conf import settings
++from django.db import connection, models
++from django.db.models import F, Sum, Window
++from django.db.models.functions import Coalesce
++
++
++def main():
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            '__main__',
++        ],
++        SECRET_KEY='secret_key_for_testing',
++    )
++    django.setup()
++
++    class MyModel(models.Model):
++        date = models.DateField()
++        DJR = models.FloatField()
++
++    with connection.schema_editor() as editor:
++        editor.create_model(MyModel)
++
++    MyModel.objects.create(date='2021-01-01', DJR=100)
++    MyModel.objects.create(date='2021-01-02', DJR=200)
++    MyModel.objects.create(date='2021-01-03', DJR=300)
++
++    qs = MyModel.objects.all().annotate(
++        cumul_DJR=Coalesce(Window(Sum('DJR'), order_by=F('date').asc()), 0.0)
++    )
++    # Attempt to aggregate over a window function.
++    results = qs.aggregate(
++        DJR_total=Sum('DJR'),
++        cumul_DJR_total=Sum('cumul_DJR')
++    )
++    print(results)
++
++if __name__ == '__main__':
++    main()

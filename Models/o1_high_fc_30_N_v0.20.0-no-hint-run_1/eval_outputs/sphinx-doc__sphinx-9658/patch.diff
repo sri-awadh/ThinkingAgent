@@ -1,0 +1,89 @@
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 000000000..00f1d5b49
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,65 @@
++import os
++import subprocess
++
++# This script attempts to demonstrate the Sphinx bug described in the PR.
++# In particular, it tests how classes inheriting a mocked torch.nn.Module are documented.
++# We'll build a small Sphinx project that mocks torch and references such a class.
++
++def main():
++    project_dir = os.path.join(os.getcwd(), 'mocked_project')
++    os.makedirs(project_dir, exist_ok=True)
++
++    conf_py = """
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ["sphinx.ext.autodoc"]
++
++autodoc_mock_imports = ["torch"]
++
++master_doc = 'index'
++"""
++
++    index_rst = """
++My Project
++==========
++
++.. automodule:: mymodule
++   :members:
++"""
++    mymodule_py = """
++class MockInheritedClass:
++    """A mocked base class (normally torch.nn.Module)."""
++    pass
++
++class MyClass(MockInheritedClass):
++    """Example class that inherits from a mocked base class."""
++    pass
++"""
++
++
++    with open(os.path.join(project_dir, 'conf.py'), 'w') as f:
++        f.write(conf_py)
++
++    with open(os.path.join(project_dir, 'index.rst'), 'w') as f:
++        f.write(index_rst)
++
++    with open(os.path.join(project_dir, 'mymodule.py'), 'w') as f:
++        f.write(mymodule_py)
++
++    # Now let's run sphinx-build
++    out_dir = os.path.join(project_dir, '_build')
++    os.makedirs(out_dir, exist_ok=True)
++
++    sphinx_cmd = ["sphinx-build", "-b", "html", project_dir, out_dir]
++    print(f"Running: {' '.join(sphinx_cmd)}")
++    res = subprocess.run(sphinx_cmd, capture_output=True)
++    print("Return code:", res.returncode)
++    print("STDOUT:\n", res.stdout.decode('utf-8', errors='replace'))
++    print("STDERR:\n", res.stderr.decode('utf-8', errors='replace'))
++
++    print("\nCheck the output in _build/html/index.html to see how 'Bases' is documented.")
++
++if __name__ == "__main__":
++    main()
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index a255c0691..cdc5b4e42 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -1664,7 +1664,12 @@ class ClassDocumenter(DocstringSignatureMixin, ModuleLevelDocumenter):  # type:
+             self.env.events.emit('autodoc-process-bases',
+                                  self.fullname, self.object, self.options, bases)
+
+-            base_classes = [restify(cls) for cls in bases]
++            base_classes = []
++            for base in bases:
++                text = restify(base)
++                if text.endswith('.'):
++                    text += getattr(base, '__name__', 'Module')
++                base_classes.append(text)
+             sourcename = self.get_sourcename()
+             self.add_line('', sourcename)
+             self.add_line('   ' + _('Bases: %s') % ', '.join(base_classes), sourcename)

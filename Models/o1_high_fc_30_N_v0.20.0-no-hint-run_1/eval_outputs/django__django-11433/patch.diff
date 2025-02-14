@@ -1,0 +1,84 @@
+diff --git a/bug_repro.py b/bug_repro.py
+new file mode 100644
+index 0000000000..87ae441d47
+--- /dev/null
++++ b/bug_repro.py
+@@ -0,0 +1 @@
++import os\nimport django\nfrom django.conf import settings\n\nsettings.configure(\n    INSTALLED_APPS=[\n        'django.contrib.contenttypes',\n        'django.contrib.auth'\n    ],\n    DATABASES={\n        'default': {\n            'ENGINE': 'django.db.backends.sqlite3',\n            'NAME': ':memory:'\n        }\n    },\n    MIDDLEWARE=[]\n)\n\ndjango.setup()\n\nfrom django.db import models\nfrom django.forms import ModelForm\n\nclass MyModel(models.Model):\n    name = models.CharField(max_length=100, default='I am the default!')\n    description = models.CharField(max_length=255, blank=True, default='This field has a default')\n\nclass MyForm(ModelForm):\n    class Meta:\n        model = MyModel\n        fields = ('name', 'description',)\n\n    def clean(self):\n        cd = super().clean()\n        # Force overwrite the description\n        cd['description'] = 'I override the default'\n        return cd\n\ndef main():\n    f = MyForm(data={'name': 'Hello'})\n    f.is_valid()\n    instance = f.save(commit=False)\n    print('Description on saved instance:', instance.description)\n\nif __name__ == '__main__':\n    main()\n
+\ No newline at end of file
+diff --git a/bug_repro2.py b/bug_repro2.py
+new file mode 100644
+index 0000000000..84b68f95fb
+--- /dev/null
++++ b/bug_repro2.py
+@@ -0,0 +1,53 @@
++import django
++import os
++from django.conf import settings
++
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'bugrepro'
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:'
++        }
++    },
++    MIDDLEWARE=[]
++    class Meta:
++        app_label = 'bugrepro'
++
++)
++
++django.setup()
++
++from django.db import models
++from django.forms import ModelForm
++
++class MyModel(models.Model):
++    name = models.CharField(max_length=100, default='I am the default!')
++    description = models.CharField(max_length=255, blank=True, default='This field has a default')
++    class Meta:
++        app_label = 'bugrepro'
++
++class MyForm(ModelForm):
++    class Meta:
++        model = MyModel
++        fields = ('name', 'description',)
++
++    def clean(self):
++        cd = super().clean()
++        # Force overwrite the description
++        cd['description'] = 'I override the default'
++        return cd
++
++def main():
++    print("Reproducing the error scenario...")
++    f = MyForm(data={'name': 'Hello'})  # 'description' is not included
++    f.is_valid()  # triggers clean()
++    instance = f.save(commit=False)
++    print('Description on saved instance:', instance.description)
++
++if __name__ == '__main__':
++    main()
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 5edbbd376f..81949609bd 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -46,11 +46,7 @@ def construct_instance(form, instance, fields=None, exclude=None):
+             continue
+         if exclude and f.name in exclude:
+             continue
+-        # Leave defaults for fields that aren't in POST data, except for
+-        # checkbox inputs because they don't appear in POST data if not checked.
+-        if (f.has_default() and
+-                form[f.name].field.widget.value_omitted_from_data(form.data, form.files, form.add_prefix(f.name))):
+-            continue
++
+         # Defer saving file-type fields until after the other fields, so a
+         # callable upload_to can use the values from other fields.
+         if isinstance(f, models.FileField):

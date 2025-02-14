@@ -1,0 +1,131 @@
+diff --git a/bug_repro.py b/bug_repro.py
+new file mode 100644
+index 0000000000..01811d32f5
+--- /dev/null
++++ b/bug_repro.py
+@@ -0,0 +1,71 @@
++import os
++import uuid
++
++from django.conf import settings
++
++# Configure Django settings for an in-memory test.
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:'
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        '__main__',
++    ],
++    MIDDLEWARE=[],
++    SECRET_KEY='secretkey'
++)
++
++import django
++
++django.setup()
++
++from django.db import connection, models
++from django.contrib.contenttypes.fields import GenericForeignKey
++from django.contrib.contenttypes.models import ContentType
++
++class Foo(models.Model):
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++
++class Bar(models.Model):
++    foo_content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
++    foo_object_id = models.CharField(max_length=255)
++    foo = GenericForeignKey('foo_content_type', 'foo_object_id')
++
++# Create the database tables.
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ContentType)
++    schema_editor.create_model(Foo)
++    schema_editor.create_model(Bar)
++
++# Create a Foo instance.
++foo_obj = Foo.objects.create()
++
++# Create a Bar that references Foo.
++ctype = ContentType.objects.get_for_model(Foo)
++bar_obj = Bar.objects.create(
++    foo_content_type=ctype,
++    foo_object_id=str(foo_obj.id)
++)
++
++# Test prefetch_related.
++
++bars = Bar.objects.all().prefetch_related('foo')
++
++found_bug = False
++for b in bars:
++    if b.foo is None:
++        print("Bug encountered: Bar ID", b.id, "foo is None when it shouldn't be.")
++        found_bug = True
++    else:
++        print("Prefetch worked: Bar ID", b.id, "foo id=", b.foo.id)
++
++if found_bug:
++    print("We have encountered the bug described in the PR.")
++else:
++    print("No bug encountered. The GFK prefetch is working for UUID PK.")
+diff --git a/django/contrib/contenttypes/fields.py b/django/contrib/contenttypes/fields.py
+index ed98ecb48c..a49fa52a0d 100644
+--- a/django/contrib/contenttypes/fields.py
++++ b/django/contrib/contenttypes/fields.py
+@@ -62,8 +62,8 @@ class GenericForeignKey(FieldCacheMixin):
+     def get_forward_related_filter(self, obj):
+         """See corresponding method on RelatedField"""
+         return {
+-            self.fk_field: obj.pk,
+-            self.ct_field: ContentType.objects.get_for_model(obj).pk,
++            self.fk_field: str(obj.pk),
++            self.ct_field: ContentType.objects.get_for_model(obj, for_concrete_model=self.for_concrete_model).pk,
+         }
+
+     def __str__(self):
+@@ -191,7 +191,10 @@ class GenericForeignKey(FieldCacheMixin):
+         for ct_id, fkeys in fk_dict.items():
+             instance = instance_dict[ct_id]
+             ct = self.get_content_type(id=ct_id, using=instance._state.db)
+-            ret_val.extend(ct.get_all_objects_for_this_type(pk__in=fkeys))
++            model = ct.model_class()
++            pk_field = model._meta.pk
++            converted_fkeys = [pk_field.to_python(key) for key in fkeys]
++            ret_val.extend(ct.get_all_objects_for_this_type(pk__in=converted_fkeys))
+
+         # For doing the join in Python, we have to match both the FK val and the
+         # content type, so we use a callable that returns a (fk, class) pair.
+@@ -202,7 +205,7 @@ class GenericForeignKey(FieldCacheMixin):
+             else:
+                 model = self.get_content_type(id=ct_id,
+                                               using=obj._state.db).model_class()
+-                return (model._meta.pk.get_prep_value(getattr(obj, self.fk_field)),
++                return (model._meta.pk.to_python(getattr(obj, self.fk_field)),
+                         model)
+
+         return (
+@@ -237,6 +240,8 @@ class GenericForeignKey(FieldCacheMixin):
+         if ct_id is not None:
+             ct = self.get_content_type(id=ct_id, using=instance._state.db)
+             try:
++                model = ct.model_class()
++                pk_val = model._meta.pk.to_python(pk_val)
+                 rel_obj = ct.get_object_for_this_type(pk=pk_val)
+             except ObjectDoesNotExist:
+                 pass
+@@ -248,7 +253,7 @@ class GenericForeignKey(FieldCacheMixin):
+         fk = None
+         if value is not None:
+             ct = self.get_content_type(obj=value)
+-            fk = value.pk
++            fk = str(value.pk)
+
+         setattr(instance, self.ct_field, ct)
+         setattr(instance, self.fk_field, fk)

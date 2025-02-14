@@ -1,0 +1,198 @@
+diff --git a/bug_repro.py b/bug_repro.py
+new file mode 100644
+index 0000000000..2b49e49857
+--- /dev/null
++++ b/bug_repro.py
+@@ -0,0 +1,138 @@
++import os
++import sys
++import uuid
++
++# Step 1: minimal Django setup.
++import django
++from django.conf import settings
++
++# We’ll create an in-memory database and a small app called 'bugapp' with the models.
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++            'django.contrib.staticfiles',
++            # We'll define a mini inlined app for demonstration
++            'bugapp',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.middleware.common.CommonMiddleware',
++            'django.middleware.csrf.CsrfViewMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        SECRET_KEY='test',
++        ROOT_URLCONF=__name__,
++        DEBUG=True,
++        ALLOWED_HOSTS=['*'],
++    )
++
++import django
++django.setup()
++
++import django
++from django.contrib import admin
++from bugapp.models import Thing, SubThing
++from django.urls import path
++
++# Register to the admin site
++class SubThingInline(admin.StackedInline):
++    model = SubThing
++
++@admin.register(Thing)
++class ThingAdmin(admin.ModelAdmin):
++    list_display = ('name',)
++    ordering = ('pkid',)
++    inlines = (SubThingInline,)
++
++
++urlpatterns = [
++    path('admin/', admin.site.urls),
++]
++
++def main():
++    # Step 2: initialize Django.
++    django.setup()
++    from django.core.management import call_command
++    # Migrate.
++    call_command('migrate', run_syncdb=True, verbosity=0)
++
++    # Create a superuser.
++    from django.contrib.auth.models import User
++    if not User.objects.filter(username='admin').exists():
++        User.objects.create_superuser('admin', 'admin@example.com', 'pass')
++
++    # We attempt to simulate the scenario of adding a new Thing along with a SubThing in one go.
++    # We'll do this by using the admin form logic.
++
++    from django.test import RequestFactory
++    from django.contrib.admin.sites import AdminSite
++
++    rf = RequestFactory()
++
++    site = AdminSite()
++    ma = ThingAdmin(Thing, site)
++
++    # We need to craft a POST that would emulate the admin form submission.
++
++    post_data = {
++        'name': 'TestThing',
++        'subthings-TOTAL_FORMS': '1',
++        'subthings-INITIAL_FORMS': '0',
++        'subthings-MIN_NUM_FORMS': '0',
++        'subthings-MAX_NUM_FORMS': '1000',
++        'subthings-0-name': 'SubThingName',
++        # Usually the admin would also have hidden fields for subthings-0-thing if the parent was saved already.
++        # But we are adding them all at once, so we want to see if Django tries to set thing_id = None.
++    }
++
++    request = rf.post('/admin/bugapp/thing/add/', post_data)
++    request.user = User.objects.get(username='admin')
++
++    # Use the admin's add_view to handle the POST.
++    response = ma.add_view(request)
++
++    if response.status_code >= 400:
++        print("Error - Status code:", response.status_code)
++        # If there's a django exception, Django might keep it in response.context_data['errors'] or so.
++        if hasattr(response, 'context_data') and response.context_data:
++            print("Context data:", response.context_data)
++        sys.exit(1)
++    else:
++        # If the bug triggers, we might see an IntegrityError or some exception.
++        # Or if we got a redirect, it means presumably it saved successfully.
++        print("Response status code =", response.status_code)
++        if hasattr(response, 'url'):
++            print("Redirected to", response.url)
++
++    # Let's see if the Thing was actually created.
++    things = Thing.objects.all()
++    request._dont_enforce_csrf_checks = True
++    subthings = SubThing.objects.all()
++    print("Things:", things)
++    print("Subthings:", subthings)
++    if things.exists():
++        t = things.first()
++        print("Thing ID:", t.id)
++    if subthings.exists():
++        st = subthings.first()
++        print("SubThing's thing:", st.thing)
++
++if __name__ == '__main__':
++    try:
++        main()
++    except Exception as e:
++        print("Exception occurred:", e)
++        sys.exit(1)
+diff --git a/bugapp/__init__.py b/bugapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/bugapp/apps.py b/bugapp/apps.py
+new file mode 100644
+index 0000000000..a8ded7650d
+--- /dev/null
++++ b/bugapp/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++
++class BugappConfig(AppConfig):
++    name = 'bugapp'
+diff --git a/bugapp/models.py b/bugapp/models.py
+new file mode 100644
+index 0000000000..4bc67eaf1a
+--- /dev/null
++++ b/bugapp/models.py
+@@ -0,0 +1,21 @@
++import uuid
++from django.db import models
++
++class UUIDModel(models.Model):
++    pkid = models.BigAutoField(primary_key=True, editable=False)
++    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
++
++    class Meta:
++        abstract = True
++
++class Thing(UUIDModel):
++    name = models.CharField(max_length=191)
++
++class SubThing(models.Model):
++    name = models.CharField(max_length=191)
++    thing = models.ForeignKey(
++        Thing,
++        to_field='id',
++        on_delete=models.CASCADE,
++        related_name='subthings',
++    )
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index f9760664dd..07d87a7c3b 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -531,6 +531,9 @@ class BaseModelAdmin(metaclass=forms.MediaDefiningClass):
+         if field.primary_key:
+             return True
+
++        if field.unique:
++            return True
++
+         # Allow reverse relationships to models defining m2m fields if they
+         # target the specified field.
+         for many_to_many in self.opts.many_to_many:

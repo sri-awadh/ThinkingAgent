@@ -1,0 +1,108 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index be8580f2c4..a8e06ab13c 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -780,9 +780,46 @@ class QuerySet(AltersData):
+         for parent in self.model._meta.get_parent_list():
+             if parent._meta.concrete_model is not self.model._meta.concrete_model:
+                 raise ValueError("Can't bulk create a multi-table inherited model")
+-        if not objs:
++        # Additional comment to differentiate
++if not objs:
+             return objs
+         opts = self.model._meta
++
++        # Translate unique_fields from model field names to actual DB column names.
++        if unique_fields:
++            transformed = []
++            for name in unique_fields:
++                # If user said "pk", we kept it as opts.pk.name above, so handle that.
++                field = opts.get_field(name)
++                col = field.db_column if field.db_column else field.column
++                transformed.append(col)
++            unique_fields = transformed
++
++        # Also translate update_fields to the DB column names if provided.
++        if update_fields:
++            for idx, uf in enumerate(update_fields):
++                field_obj = opts.get_field(uf)
++                if field_obj.db_column:
++                    update_fields[idx] = field_obj.db_column
++                else:
++                    update_fields[idx] = field_obj.column
++# Translate unique_fields from model field names to actual DB column names.
++if unique_fields:
++    transformed = []
++    for name in unique_fields:
++        # If user said "pk", we kept it as opts.pk.name above, so handle that.
++        field = opts.get_field(name)
++        col = field.db_column if field.db_column else field.column
++        transformed.append(col)
++    unique_fields = transformed
++# Also translate update_fields to the DB column names if provided.
++if update_fields:
++    for idx, uf in enumerate(update_fields):
++        field_obj = opts.get_field(uf)
++        if field_obj.db_column:
++            update_fields[idx] = field_obj.db_column
++        else:
++            update_fields[idx] = field_obj.column
+         if unique_fields:
+             # Primary key is allowed in unique_fields.
+             unique_fields = [
+diff --git a/replicate_issue.py b/replicate_issue.py
+new file mode 100644
+index 0000000000..f145f46cf7
+--- /dev/null
++++ b/replicate_issue.py
+@@ -0,0 +1,49 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure settings if not already configured.
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=["__main__"],  # minimal config
++        DATABASES={
++            "default": {
++                "ENGINE": "django.db.backends.sqlite3",
++                "NAME": ":memory:",
++            }
++        },
++    )
++
++# Initialize Django.
++django.setup()
++
++class ActivityBlackListed(models.Model):
++    class Meta:
++        db_table = "Activity_BlackListed"
++    blacklistid = models.IntegerField(primary_key=True, db_column="BlacklistID")
++    sectorid = models.IntegerField(null=True, blank=True, db_column="SectorID")
++
++# Recreate the table in the test database for demonstration.
++with django.db.connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ActivityBlackListed)
++
++def recreate_error():
++    # Attempt to trigger the error from the PR description
++    objs = [
++        ActivityBlackListed(blacklistid=1, sectorid=100),
++        ActivityBlackListed(blacklistid=2, sectorid=200),
++    ]
++    ActivityBlackListed.objects.bulk_create(
++        objs, update_conflicts=True,
++        update_fields=["sectorid"],
++        unique_fields=["blacklistid"]
++    )
++
++if __name__ == "__main__":
++    try:
++        recreate_error()
++        print("No error occurred. Possibly not replicated.")
++    except Exception as e:
++        print("Error occurred:")
++        print(e)
+\ No newline at end of file

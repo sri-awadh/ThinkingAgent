@@ -1,0 +1,73 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index e3b14a41a0..5fe0efc317 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -847,27 +847,56 @@ class Model(metaclass=ModelBase):
+         if not pk_set and (force_update or update_fields):
+             raise ValueError("Cannot force an update in save() with no primary key.")
+         updated = False
+-        # Skip an UPDATE when adding an instance and primary key has a default.
++        # Skip an UPDATE when adding an instance and primary key has a default,
++        # but only if we don't have an explicit primary key value
+         if (
+             not force_insert and
+             self._state.adding and
+             self._meta.pk.default and
+-            self._meta.pk.default is not NOT_PROVIDED
++            self._meta.pk.default is not NOT_PROVIDED and
++            not hasattr(self, self._meta.pk.attname)
+         ):
+             force_insert = True
+-        # If possible, try an UPDATE. If that doesn't update anything, do an INSERT.
++        # If we have an explicit primary key value, don't force insert
++        if hasattr(self, self._meta.pk.attname):
++            force_insert = False
++        # If we have a primary key value, check if it exists in the database
+         if pk_set and not force_insert:
+             base_qs = cls._base_manager.using(using)
+-            values = [(f, None, (getattr(self, f.attname) if raw else f.pre_save(self, False)))
+-                      for f in non_pks]
+-            forced_update = update_fields or force_update
+-            updated = self._do_update(base_qs, using, pk_val, values, update_fields,
+-                                      forced_update)
+-            if force_update and not updated:
+-                raise DatabaseError("Forced update did not affect any rows.")
+-            if update_fields and not updated:
+-                raise DatabaseError("Save with update_fields did not affect any rows.")
++            exists = base_qs.filter(pk=pk_val).exists()
++            if exists:
++                # If the record exists, perform an UPDATE
++                values = [(f, None, (getattr(self, f.attname) if raw else f.pre_save(self, False)))
++                          for f in non_pks]
++                forced_update = update_fields or force_update
++                updated = self._do_update(base_qs, using, pk_val, values, update_fields,
++                                          forced_update)
++                if force_update and not updated:
++                    raise DatabaseError("Forced update did not affect any rows.")
++                if update_fields and not updated:
++                    raise DatabaseError("Save with update_fields did not affect any rows.")
++            else:
++                # If the record doesn't exist, perform an INSERT
++                updated = False
++        elif not pk_set:
++            # If we don't have a primary key value, perform an INSERT
++            updated = False
+         if not updated:
++            # If we have an explicit primary key value, don't force insert
++            if hasattr(self, self._meta.pk.attname):
++                force_insert = False
++            # If we have an explicit primary key value and it exists in the database, perform an UPDATE
++            if hasattr(self, self._meta.pk.attname) and base_qs.filter(pk=pk_val).exists():
++                updated = True
++            # If we have an explicit primary key value and it doesn't exist in the database, perform an INSERT
++            elif hasattr(self, self._meta.pk.attname) and not base_qs.filter(pk=pk_val).exists():
++                updated = False
++            # If we have an explicit primary key value and it exists in the database, perform an UPDATE
++            if hasattr(self, self._meta.pk.attname) and base_qs.filter(pk=pk_val).exists():
++                updated = True
++            # If we have an explicit primary key value and it doesn't exist in the database, perform an INSERT
++            elif hasattr(self, self._meta.pk.attname) and not base_qs.filter(pk=pk_val).exists():
++                updated = False
+             if meta.order_with_respect_to:
+                 # If this is a model with an order_with_respect_to
+                 # autopopulate the _order field

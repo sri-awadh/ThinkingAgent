@@ -1,0 +1,51 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 55b1691166..1a0223e462 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -872,6 +872,10 @@ class Model(metaclass=ModelBase):
+             results = self._do_insert(cls._base_manager, using, fields, returning_fields, raw)
+             if results:
+                 for value, field in zip(results[0], returning_fields):
++                    if value is not None and hasattr(field, 'from_db_value'):
++                        from django.db import connections
++                        db_con = connections[using or self._state.db]
++                        value = field.from_db_value(value, None, db_con)
+                     setattr(self, field.attname, value)
+         return updated
+
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index f02199d97c..beae24bd32 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1411,14 +1411,25 @@ class SQLInsertCompiler(SQLCompiler):
+                 cursor.execute(sql, params)
+             if not self.returning_fields:
+                 return []
++            rows = None
+             if self.connection.features.can_return_rows_from_bulk_insert and len(self.query.objs) > 1:
+-                return self.connection.ops.fetch_returned_insert_rows(cursor)
+-            if self.connection.features.can_return_columns_from_insert:
++                rows = self.connection.ops.fetch_returned_insert_rows(cursor)
++            elif self.connection.features.can_return_columns_from_insert:
+                 assert len(self.query.objs) == 1
+-                return [self.connection.ops.fetch_returned_insert_columns(cursor, self.returning_params)]
+-            return [(self.connection.ops.last_insert_id(
+-                cursor, self.query.get_meta().db_table, self.query.get_meta().pk.column
+-            ),)]
++                rows = [self.connection.ops.fetch_returned_insert_columns(cursor, self.returning_params)]
++            else:
++                rows = [(self.connection.ops.last_insert_id(
++                    cursor, self.query.get_meta().db_table, self.query.get_meta().pk.column
++                ),)]
++            new_rows = []
++            for row in rows:
++                new_row = []
++                for value, field in zip(row, self.returning_fields):
++                    if value is not None and hasattr(field, 'from_db_value'):
++                        value = field.from_db_value(value, None, self.connection)
++                    new_row.append(value)
++                new_rows.append(tuple(new_row))
++            return new_rows
+
+
+ class SQLDeleteCompiler(SQLCompiler):

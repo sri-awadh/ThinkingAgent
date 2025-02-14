@@ -1,0 +1,81 @@
+diff --git a/bug_repro.py b/bug_repro.py
+new file mode 100644
+index 0000000000..d624570217
+--- /dev/null
++++ b/bug_repro.py
+@@ -0,0 +1,57 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++import uuid
++from django.test import TestCase
++
++NAME = "test_db.sqlite3"
++if os.path.exists(NAME):
++    os.remove(NAME)
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='secret',
++    INSTALLED_APPS=['__main__'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': NAME,
++        }
++    }
++)
++django.setup()
++
++from django.core.management import call_command
++call_command('migrate', interactive=False, verbosity=1)
++
++
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    def reset(self):
++        self.uid = None
++        self.f = False
++
++class Derived(Item):
++    pass
++
++
++class SaveTestCase(TestCase):
++    def setUp(self):
++        self.derived = Derived.objects.create(f=True)  # create the first object
++        item = Item.objects.get(pk=self.derived.pk)
++        obj1 = item.derived
++        obj1.reset()
++        obj1.save()  # the first object is overwritten
++
++    def test_f_true(self):
++        obj = Item.objects.get(pk=self.derived.pk)
++        self.assertTrue(obj.f)
++
++if __name__ == '__main__':
++    import sys
++    from django.test.runner import DiscoverRunner
++    test_runner = DiscoverRunner(verbosity=2)
++    failures = test_runner.run_tests(['__main__'])
++    sys.exit(bool(failures))
+\ No newline at end of file
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 844c01e95e..29866bee46 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -807,6 +807,8 @@ class Model(metaclass=ModelBase):
+             if (field and getattr(self, parent._meta.pk.attname) is None and
+                     getattr(self, field.attname) is not None):
+                 setattr(self, parent._meta.pk.attname, getattr(self, field.attname))
++                if self.pk is None:
++                    setattr(self, parent._meta.pk.attname, None)
+             parent_inserted = self._save_parents(cls=parent, using=using, update_fields=update_fields)
+             updated = self._save_table(
+                 cls=parent, using=using, update_fields=update_fields,
+diff --git a/test_db.sqlite3 b/test_db.sqlite3
+new file mode 100644
+index 0000000000..41ff276589
+Binary files /dev/null and b/test_db.sqlite3 differ

@@ -1,0 +1,80 @@
+diff --git a/scripts/reproduce_bug.py b/scripts/reproduce_bug.py
+new file mode 100644
+index 000000000..c2f694d60
+--- /dev/null
++++ b/scripts/reproduce_bug.py
+@@ -0,0 +1,48 @@
++import subprocess, sys, os
++import tempfile
++
++# This script replicates the steps from the PR description.
++# We create a minimal Sphinx project with a conf.py specifying
++# needs_extensions = { 'sphinx_gallery.gen_gallery': '0.6.0' } and then install
++# sphinx-gallery==0.10.0 to trigger the error.
++
++
++def main():
++    # Step 1: Install the local Sphinx code
++    # This is done by "pip install ." from the current directory.
++    # We'll assume we run this script from within the /workspace/sphinx-doc__sphinx__4.3 directory.
++
++    sphinx_source_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
++
++    print("Installing local Sphinx...")
++    subprocess.run([sys.executable, '-m', 'pip', 'install', '-e', sphinx_source_dir], check=True)
++
++    # Step 2: Install sphinx-gallery==0.10.0
++    print("Installing sphinx-gallery 0.10...")
++    subprocess.run([sys.executable, '-m', 'pip', 'install', 'sphinx-gallery==0.10.0'], check=True)
++
++    # Step 3: Create a minimal Sphinx project in a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        conf_path = os.path.join(tmpdir, 'conf.py')
++        with open(conf_path, 'w') as f:
++            f.write("needs_extensions = {'sphinx_gallery.gen_gallery': '0.6.0'}\n")
++            # We'll also do minimal config lines
++            f.write("extensions = ['sphinx_gallery.gen_gallery']\n")
++
++        # Step 4: Run Sphinx build
++        print("Running sphinx-build...")
++        res = subprocess.run([
++            'sphinx-build', '-b', 'html', tmpdir, os.path.join(tmpdir, '_build')
++        ], capture_output=True, text=True)
++
++        print("sphinx-build return code:", res.returncode)
++        print("sphinx-build stdout:\n", res.stdout)
++        print("sphinx-build stderr:\n", res.stderr)
++
++        if res.returncode == 0:
++            print("No error was encountered, but we expected an error with the current code.")
++        else:
++            print("We got an error, which is expected if the version check code is string-based.")
++
++if __name__ == '__main__':
++    main()
+diff --git a/sphinx/extension.py b/sphinx/extension.py
+index 7ec6c8518..5604e3c5d 100644
+--- a/sphinx/extension.py
++++ b/sphinx/extension.py
+@@ -14,6 +14,7 @@ from sphinx.config import Config
+ from sphinx.errors import VersionRequirementError
+ from sphinx.locale import __
+ from sphinx.util import logging
++from packaging.version import parse as parse_version
+
+ if TYPE_CHECKING:
+     from sphinx.application import Sphinx
+@@ -51,7 +52,12 @@ def verify_needs_extensions(app: "Sphinx", config: Config) -> None:
+                               'but it is not loaded.'), extname)
+             continue
+
+-        if extension.version == 'unknown version' or reqversion > extension.version:
++        if extension.version == 'unknown version':
++            raise VersionRequirementError(__('This project needs the extension %s at least in '
++                                             'version %s and therefore cannot be built with '
++                                             'the loaded version (%s).') %
++                                          (extname, reqversion, extension.version))
++        if parse_version(extension.version) < parse_version(reqversion):
+             raise VersionRequirementError(__('This project needs the extension %s at least in '
+                                              'version %s and therefore cannot be built with '
+                                              'the loaded version (%s).') %

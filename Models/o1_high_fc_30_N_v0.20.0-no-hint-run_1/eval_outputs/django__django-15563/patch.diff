@@ -1,0 +1,127 @@
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..ec4abfebf4 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -70,6 +70,17 @@ class UpdateQuery(Query):
+
+     def update_batch(self, pk_list, values, using):
+         self.add_update_values(values)
++        # Only run the main update if there are actually fields to update on this (child) table.
++        if self.values:
++            for offset in range(0, len(pk_list), GET_ITERATOR_CHUNK_SIZE):
++                self.clear_where()
++                self.add_filter(
++                    "pk__in", pk_list[offset : offset + GET_ITERATOR_CHUNK_SIZE]
++                )
++                self.get_compiler(using).execute_sql(NO_RESULTS)
++
++        # Now proceed with parent updates if needed.
++
+         for offset in range(0, len(pk_list), GET_ITERATOR_CHUNK_SIZE):
+             self.clear_where()
+             self.add_filter(
+@@ -77,13 +88,37 @@ class UpdateQuery(Query):
+             )
+             self.get_compiler(using).execute_sql(NO_RESULTS)
+
++        # Perform parent updates for multi-inheritance.
++        if self.related_updates:
++            child_columns = set(f.column for f in self.get_meta().local_concrete_fields)
++            from django.db import connections
++            connection = connections[using]
++            # Convert pk_list to a comma-separated string.
++            pk_list_str = ','.join(str(pk) for pk in pk_list)
++            for pm, fields_dict in self.related_updates.items():
++                parent_db_table = pm._meta.db_table
++                parent_pk_column = pm._meta.pk.column
++                child_db_table = self.get_meta().db_table
++                child_pk_column = self.get_meta().pk.column
++                parent_link = self.get_meta().get_ancestor_link(pm)
++                parent_link_column = parent_link.column
++                # For each field to update on the parent, build a raw SQL update with a subselect.
++                for f, val in fields_dict.items():
++                    sql = f"UPDATE \"{parent_db_table}\" SET \"{f.column}\" = ? WHERE \"{parent_pk_column}\" IN (SELECT \"{parent_link_column}\" FROM \"{child_db_table}\" WHERE \"{child_pk_column}\" IN ({pk_list_str}))"
++
++                    with connection.cursor() as cursor:
++                        cursor.execute(sql, [val])
++
+     def add_update_values(self, values):
+         """
+         Convert a dictionary of field name to value mappings into an update
+         query. This is the entry point for the public update() method on
+         querysets.
+         """
++        # Distinguish between child columns and parent columns
++        child_field_names = {f.name for f in self.get_meta().local_fields}
+         values_seq = []
++        child_columns = set(f.column for f in self.get_meta().local_concrete_fields)
+         for name, val in values.items():
+             field = self.get_meta().get_field(name)
+             direct = (
+diff --git a/reproducer.py b/reproducer.py
+new file mode 100644
+index 0000000000..239a9289e8
+--- /dev/null
++++ b/reproducer.py
+@@ -0,0 +1,61 @@
++import django
++import sys
++from django.conf import settings
++import os
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=['__main__'],
++        SECRET_KEY='testkey',
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        }
++    )
++
++import django
++django.setup()
++
++from django.db import models
++
++class Base(models.Model):
++    base_id = models.AutoField(primary_key=True)
++    field_base = models.IntegerField()
++
++class OtherBase(models.Model):
++    otherbase_id = models.AutoField(primary_key=True)
++    field_otherbase = models.IntegerField()
++
++class Child(Base, OtherBase):
++    pass
++
++def main():
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Base)
++        schema_editor.create_model(OtherBase)
++        schema_editor.create_model(Child)
++
++
++    b1 = OtherBase.objects.create(field_otherbase=100)
++    b2 = OtherBase.objects.create(field_otherbase=101)
++    c1 = Child.objects.create(field_base=0, field_otherbase=0)
++    c2 = Child.objects.create(field_base=1, field_otherbase=1)
++
++    Child.objects.update(field_otherbase=55)
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute('PRAGMA table_info("__main___otherbase");')
++        print("__main___otherbase schema:", cursor.fetchall())
++        cursor.execute('PRAGMA table_info("__main___child");')
++        print("__main___child schema:", cursor.fetchall())
++
++    print("Child field_otherbase after update:", list(Child.objects.values('field_otherbase')))
++    print("OtherBase field_otherbase after update:", list(OtherBase.objects.values('field_otherbase')))
++
++if __name__ == '__main__':
++    main()

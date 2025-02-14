@@ -1,0 +1,78 @@
+diff --git a/sympy/parsing/sympy_parser.py b/sympy/parsing/sympy_parser.py
+index 52711d1324..7186fc1181 100644
+--- a/sympy/parsing/sympy_parser.py
++++ b/sympy/parsing/sympy_parser.py
+@@ -1187,6 +1187,63 @@ def visit_BinOp(self, node):
+         return node
+
+     def visit_Call(self, node):
++    def visit_Compare(self, node):
++        # Transform Python comparison operators into Sympy Relational calls with evaluate=False.
++        # For example, 1 < 2 => Lt(1, 2, evaluate=False)
++        # For chained comparisons like 1 < x < 2, produce And(Lt(1,x,evaluate=False), Lt(x,2,evaluate=False), evaluate=False)
++        import ast
++        self.generic_visit(node)
++        op_map = {
++            ast.Lt: 'Lt',
++            ast.Gt: 'Gt',
++            ast.LtE: 'Le',
++            ast.GtE: 'Ge',
++            ast.Eq: 'Eq',
++            ast.NotEq: 'Ne',
++        }
++        if not node.ops:
++            return node
++        left = node.left
++        ops = node.ops
++        comps = node.comparators
++        # single comparison
++        if len(ops) == 1:
++            op_type = type(ops[0])
++            if op_type in op_map:
++                rel_name = op_map[op_type]
++                new_node = ast.Call(
++                    func=ast.Name(id=rel_name, ctx=ast.Load()),
++                    args=[left, comps[0]],
++                    keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False))],
++                )
++                return new_node
++            else:
++                return node
++        else:
++            # multiple comparison
++            def make_rel(o_idx, l, r):
++                o_type = type(ops[o_idx])
++                if o_type not in op_map:
++                    # fallback
++                    return ast.Compare(left=l, ops=[ops[o_idx]], comparators=[r])
++                name = op_map[o_type]
++                return ast.Call(
++                    func=ast.Name(id=name, ctx=ast.Load()),
++                    args=[l, r],
++                    keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False))],
++                )
++
++            current = make_rel(0, left, comps[0])
++            for i in range(1, len(ops)):
++                next_rel = make_rel(i, comps[i-1], comps[i])
++                # combine with And
++                current = ast.Call(
++                    func=ast.Name(id='And', ctx=ast.Load()),
++                    args=[current, next_rel],
++                    keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False))],
++                )
++            return current
++
+         new_node = self.generic_visit(node)
+         if isinstance(node.func, ast.Name) and node.func.id in self.functions:
+             new_node.keywords.append(ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load())))
+diff --git a/temp_repro/repro_relational.py b/temp_repro/repro_relational.py
+new file mode 100644
+index 0000000000..5bdb322455
+--- /dev/null
++++ b/temp_repro/repro_relational.py
+@@ -0,0 +1,4 @@
++from sympy.parsing.sympy_parser import parse_expr
++
++expr = parse_expr('1 < 2', evaluate=False)
++print(expr)

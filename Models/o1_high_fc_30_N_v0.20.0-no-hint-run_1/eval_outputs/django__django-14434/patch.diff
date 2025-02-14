@@ -1,0 +1,65 @@
+diff --git a/django/db/backends/ddl_references.py b/django/db/backends/ddl_references.py
+index c06386a2fa..b8f1762b0d 100644
+--- a/django/db/backends/ddl_references.py
++++ b/django/db/backends/ddl_references.py
+@@ -65,7 +65,9 @@ class TableColumns(Table):
+         self.columns = columns
+
+     def references_column(self, table, column):
+-        return self.table == table and column in self.columns
++        self_table_name = self.table.table if hasattr(self.table, 'table') else self.table
++        other_table_name = table.table if hasattr(table, 'table') else table
++        return self_table_name == other_table_name and column in self.columns
+
+     def rename_column_references(self, table, old_column, new_column):
+         if self.table == table:
+diff --git a/reproduce_bug.py b/reproduce_bug.py
+new file mode 100644
+index 0000000000..5188f334a4
+--- /dev/null
++++ b/reproduce_bug.py
+@@ -0,0 +1,44 @@
++import sys
++import os
++
++# Make sure we load Django from our local copy in django__django__4.0 instead of a system-wide Django.
++sys.path.insert(0, os.path.dirname(__file__))
++
++import django
++from django.conf import settings
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[],  # We'll define our model below
++        DATABASES=DATABASES,
++    )
++
++# Initialize Django
++django.setup()
++
++from django.db import connection, models
++
++# Define a simple model with a unique field
++class MyModel(models.Model):
++    unique_field = models.CharField(max_length=50, unique=True)
++
++    class Meta:
++        app_label = '__main__'  # So Django can identify this as a valid app
++
++with connection.schema_editor() as editor:
++    # Generate the SQL for creating a unique constraint via _create_unique_sql.
++    # We pass the column name ("unique_field") to see if references_column() is recognized.
++    sql = editor._create_unique_sql(MyModel, ['unique_field'])
++    print('SQL generated:', sql)
++    # Check if the statement references the table and column.
++    if sql and sql.references_column(MyModel._meta.db_table, 'unique_field'):
++        print('references_column returned True')
++    else:
++        print('references_column returned False')

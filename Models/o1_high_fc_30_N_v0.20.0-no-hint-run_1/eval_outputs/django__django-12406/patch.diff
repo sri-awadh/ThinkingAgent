@@ -1,0 +1,102 @@
+diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py
+index f269d9e17f..b63999f6db 100644
+--- a/django/db/models/fields/related.py
++++ b/django/db/models/fields/related.py
+@@ -975,12 +975,17 @@ class ForeignKey(ForeignObject):
+             raise ValueError("Cannot create form field for %r yet, because "
+                              "its related model %r has not been loaded yet" %
+                              (self.name, self.remote_field.model))
+-        return super().formfield(**{
++        field = super().formfield(**{
+             'form_class': forms.ModelChoiceField,
+             'queryset': self.remote_field.model._default_manager.using(using),
+             'to_field_name': self.remote_field.field_name,
+             **kwargs,
+         })
++        if not self.blank and isinstance(field.widget, forms.RadioSelect):
++            field.empty_label = None
++        return field
++
++
+
+     def db_check(self, connection):
+         return []
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..c4c7e0cd08
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,73 @@
++import sys
++import os
++
++# We'll keep this script fairly self-contained.
++# It sets up a minimal Django environment in-memory,
++# defines a model with blank=False, a ModelForm with RadioSelect,
++# and prints out the rendered form to confirm that a blank choice is shown.
++# We'll then fix it in the Django source and re-run to confirm that blank is gone.
++
++def main():
++    import django
++    from django.conf import settings
++    from django.core.management import execute_from_command_line
++    from django.db import models
++    from django.forms import ModelForm, RadioSelect
++
++    # Minimal Django settings:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='not-so-secret',
++        INSTALLED_APPS=[__name__],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        MIDDLEWARE_CLASSES=[],
++        USE_I18N=False,
++        USE_L10N=False,
++        USE_TZ=False,
++    )
++
++    django.setup()
++
++    class BatchData(models.Model):
++        name = models.CharField(max_length=50, default='First Data File')
++
++    class TestRun(models.Model):
++        data_file = models.ForeignKey(BatchData, on_delete=models.SET_NULL, null=True, blank=False)
++
++    class TestRunForm(ModelForm):
++        class Meta:
++            model = TestRun
++            fields = ['data_file']
++            widgets = {'data_file': RadioSelect()}
++
++    # Make migrations in memory
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(BatchData)
++        schema_editor.create_model(TestRun)
++
++
++    # Create a BatchData object so there's at least one choice
++    bd = BatchData.objects.create(name='First Data File')
++
++    # Construct a blank form (no instance) to replicate the scenario
++    form = TestRunForm()
++    rendered = str(form['data_file'])
++
++    print("\n+++ Reproduction Script Output +++\n")
++    print(rendered)
++    print("\n+++ End of Output +++\n")
++
++    # Check if the blank radio option with '---------' is present
++    if 'value=""' in rendered:
++        print("\n[ISSUE] A blank radio option IS present.\n")
++    else:
++        print("\n[OK] No blank radio found.\n")
++
++if __name__ == '__main__':
++    main()

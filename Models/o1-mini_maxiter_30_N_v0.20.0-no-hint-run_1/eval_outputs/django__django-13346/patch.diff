@@ -1,0 +1,110 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fafc1beee8..1102cce1ac 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -268,7 +268,47 @@ JSONField.register_lookup(HasKeys)
+ JSONField.register_lookup(HasAnyKeys)
+ JSONField.register_lookup(JSONExact)
+
++class KeyTransformIn(lookups.In):
++class KeyTransformIn(lookups.In):
++    lookup_name = 'in'
+
++    def as_sql(self, compiler, connection):
++        lhs, lhs_params = self.process_lhs(compiler, connection)
++        rhs, rhs_params = self.process_rhs(compiler, connection)
++
++        if connection.vendor == 'sqlite':
++            placeholders = ', '.join(['?'] * len(rhs_params))
++            sql = f"conditions = []
++params = []
++for value in rhs_params:
++    conditions.append(f"JSON_EXTRACT({lhs}, '$.key') = ?")
++    params.append(value)
++sql = " OR ".join(conditions)
++return f"({sql})", params"
++            return sql, rhs_params
++        elif connection.vendor == 'mysql':
++            # MySQL uses JSON_CONTAINS for JSON fields
++            # It checks if the JSON document contains a specific value
++            conditions = []
++            params = []
++            for value in rhs_params:
++                conditions.append("JSON_CONTAINS({0}, %s, '$.key')".format(lhs))
++                params.append(json.dumps(value))
++            sql = " OR ".join(conditions)
++            return f"({sql})", params
++        elif connection.vendor == 'oracle':
++            # Oracle uses JSON_EXISTS with a JSON path expression
++            conditions = []
++            params = []
++            for value in rhs_params:
++                conditions.append("JSON_EXISTS({0}, '$.key = {1}')".format(lhs, '%s'))
++                params.append(json.dumps(value))
++            sql = " OR ".join(conditions)
++            return f"({sql})", params
++        else:
++            return super().as_sql(compiler, connection)
++
++JSONField.register_lookup(KeyTransformIn)
+ class KeyTransform(Transform):
+     postgres_operator = '->'
+     postgres_nested_operator = '#>'
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..05cc46ddb7
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,51 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++import sys
++sys.path.insert(0, "/workspace/django__django__3.2")
++
++# Configure settings for the Django project
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++django.setup()
++
++class OurModel(models.Model):
++    our_field = models.JSONField()
++
++    class Meta:
++        app_label = '__main__'
++
++# Create the database tables
++
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(OurModel)
++
++# Create sample data
++OurModel.objects.create(our_field={'key': 0})
++OurModel.objects.create(our_field={'key': 1})
++
++# First filter using __in
++first_filter = {'our_field__key__in': [0]}
++first_items = OurModel.objects.filter(**first_filter)
++print(f'First filter count: {first_items.count()}')
++
++# Second filter without __in
++second_filter = {'our_field__key': 0}
++second_items = OurModel.objects.filter(**second_filter)
++print(f'Second filter count: {second_items.count()}')
+\ No newline at end of file

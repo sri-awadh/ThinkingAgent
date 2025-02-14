@@ -1,0 +1,251 @@
+2025-01-15 23:04:04,555 - INFO - Environment image sweb.env.x86_64.502d8fc6ebccd881244091:latest found for pydata__xarray-3151
+Building instance image sweb.eval.x86_64.pydata__xarray-3151:latest for pydata__xarray-3151
+2025-01-15 23:04:04,557 - INFO - Image sweb.eval.x86_64.pydata__xarray-3151:latest already exists, skipping build.
+2025-01-15 23:04:04,557 - INFO - Creating container for pydata__xarray-3151...
+2025-01-15 23:04:04,607 - INFO - Container for pydata__xarray-3151 created: f9eb27ee747197d6a40e9e17fa9e585b1837ef7ecfe429d24288be72cc462770
+2025-01-15 23:04:04,830 - INFO - Container for pydata__xarray-3151 started: f9eb27ee747197d6a40e9e17fa9e585b1837ef7ecfe429d24288be72cc462770
+2025-01-15 23:04:04,830 - INFO - Intermediate patch for pydata__xarray-3151 written to logs/run_evaluation/20250115_225855/deepseek-chat_maxiter_30_N_v0.20.0-no-hint-run_1/pydata__xarray-3151/patch.diff, now applying to container...
+2025-01-15 23:04:05,067 - INFO - Failed to apply patch to container, trying again...
+2025-01-15 23:04:05,109 - INFO - >>>>> Applied Patch:
+patching file xarray/core/combine.py
+patching file xarray/core/concat.py
+
+2025-01-15 23:04:05,224 - INFO - Git diff before:
+diff --git a/xarray/core/combine.py b/xarray/core/combine.py
+index 37ae903b..a73beecf 100644
+--- a/xarray/core/combine.py
++++ b/xarray/core/combine.py
+@@ -178,7 +178,26 @@ def _combine_nd(combined_ids, concat_dims, data_vars='all',
+                                                     coords=coords,
+                                                     compat=compat,
+                                                     fill_value=fill_value)
++
+     (combined_ds,) = combined_ids.values()
++
++    # Skip monotonic check for dimensions where coordinates are identical across all datasets
++    if len(combined_ids) > 1:
++        first_ds = next(iter(combined_ids.values()))
++        for dim in first_ds.dims:
++            if dim in first_ds:
++                all_identical = all(
++                    (ds[dim].values == first_ds[dim].values).all()
++                    for ds in combined_ids.values()
++                )
++                if all_identical:
++                    continue
++                indexes = combined_ds.indexes.get(dim)
++                if not (indexes.is_monotonic_increasing or indexes.is_monotonic_decreasing):
++                    raise ValueError("Resulting object does not have monotonic"
++                                   " global indexes along dimension {}"
++                                   .format(dim))
++
+     return combined_ds
+ 
+ 
+@@ -209,9 +228,30 @@ def _combine_1d(datasets, concat_dim, compat='no_conflicts', data_vars='all',
+     """
+ 
+     if concat_dim is not None:
++        # Check if coordinates are identical across all datasets
++        first_ds = datasets[0]
++        identical_coords = {}
++        for dim in first_ds.dims:
++            if dim in first_ds:
++                all_identical = all(
++                    (ds[dim].values == first_ds[dim].values).all()
++                    for ds in datasets[1:]
++                )
++                identical_coords[dim] = all_identical
++
+         try:
+             combined = concat(datasets, dim=concat_dim, data_vars=data_vars,
+                               coords=coords, fill_value=fill_value)
++
++            # Skip monotonic check for dimensions with identical coordinates
++            for dim, is_identical in identical_coords.items():
++                if is_identical:
++                    continue
++                indexes = combined.indexes.get(dim)
++                if not (indexes.is_monotonic_increasing or indexes.is_monotonic_decreasing):
++                    raise ValueError("Resulting object does not have monotonic"
++                                   " global indexes along dimension {}"
++                                   .format(dim))
+         except ValueError as err:
+             if "encountered unexpected variable" in str(err):
+                 raise ValueError("These objects cannot be combined using only "
+@@ -501,8 +541,19 @@ def combine_by_coords(datasets, compat='no_conflicts', data_vars='all',
+                                    fill_value=fill_value)
+ 
+         # Check the overall coordinates are monotonically increasing
++        # Skip check for dimensions where coordinates are identical across all datasets
+         for dim in concatenated.dims:
+             if dim in concatenated:
++                # Check if coordinates are identical across all datasets
++                first_coord = datasets[0][dim].values
++                all_identical = all(
++                    (ds[dim].values == first_coord).all()
++                    for ds in datasets[1:]
++                )
++                if all_identical:
++                    continue
++
++                # Only check monotonicity if coordinates are not identical
+                 indexes = concatenated.indexes.get(dim)
+                 if not (indexes.is_monotonic_increasing
+                         or indexes.is_monotonic_decreasing):
+diff --git a/xarray/core/concat.py b/xarray/core/concat.py
+index cd59d878..0a65f355 100644
+--- a/xarray/core/concat.py
++++ b/xarray/core/concat.py
+@@ -225,11 +225,27 @@ def _dataset_concat(datasets, dim, data_vars, coords, compat, positions,
+     dim, coord = _calc_concat_dim_coord(dim)
+     # Make sure we're working on a copy (we'll be loading variables)
+     datasets = [ds.copy() for ds in datasets]
++    # Check for identical coordinates across all datasets
++    identical_coords = {}
++    first_ds = datasets[0]
++    for dim_name in first_ds.dims:
++        if dim_name in first_ds:
++            all_identical = all(
++                (ds[dim_name].values == first_ds[dim_name].values).all()
++                for ds in datasets[1:]
++            )
++            identical_coords[dim_name] = all_identical
++
+     datasets = align(*datasets, join='outer', copy=False, exclude=[dim],
+                      fill_value=fill_value)
+ 
+     concat_over, equals = _calc_concat_over(datasets, dim, data_vars, coords)
+ 
++    # Skip monotonic check for dimensions with identical coordinates
++    for dim_name, is_identical in identical_coords.items():
++        if is_identical and dim_name in concat_over:
++            concat_over.remove(dim_name)
++
+     def insert_result_variable(k, v):
+         assert isinstance(v, Variable)
+         if k in datasets[0].coords:
+2025-01-15 23:04:05,224 - INFO - Eval script for pydata__xarray-3151 written to logs/run_evaluation/20250115_225855/deepseek-chat_maxiter_30_N_v0.20.0-no-hint-run_1/pydata__xarray-3151/eval.sh; copying to container...
+2025-01-15 23:04:13,915 - INFO - Test runtime: 8.55 seconds
+2025-01-15 23:04:13,915 - INFO - Test output for pydata__xarray-3151 written to logs/run_evaluation/20250115_225855/deepseek-chat_maxiter_30_N_v0.20.0-no-hint-run_1/pydata__xarray-3151/test_output.txt
+2025-01-15 23:04:13,974 - INFO - Git diff after:
+diff --git a/xarray/core/combine.py b/xarray/core/combine.py
+index 37ae903b..a73beecf 100644
+--- a/xarray/core/combine.py
++++ b/xarray/core/combine.py
+@@ -178,7 +178,26 @@ def _combine_nd(combined_ids, concat_dims, data_vars='all',
+                                                     coords=coords,
+                                                     compat=compat,
+                                                     fill_value=fill_value)
++
+     (combined_ds,) = combined_ids.values()
++
++    # Skip monotonic check for dimensions where coordinates are identical across all datasets
++    if len(combined_ids) > 1:
++        first_ds = next(iter(combined_ids.values()))
++        for dim in first_ds.dims:
++            if dim in first_ds:
++                all_identical = all(
++                    (ds[dim].values == first_ds[dim].values).all()
++                    for ds in combined_ids.values()
++                )
++                if all_identical:
++                    continue
++                indexes = combined_ds.indexes.get(dim)
++                if not (indexes.is_monotonic_increasing or indexes.is_monotonic_decreasing):
++                    raise ValueError("Resulting object does not have monotonic"
++                                   " global indexes along dimension {}"
++                                   .format(dim))
++
+     return combined_ds
+ 
+ 
+@@ -209,9 +228,30 @@ def _combine_1d(datasets, concat_dim, compat='no_conflicts', data_vars='all',
+     """
+ 
+     if concat_dim is not None:
++        # Check if coordinates are identical across all datasets
++        first_ds = datasets[0]
++        identical_coords = {}
++        for dim in first_ds.dims:
++            if dim in first_ds:
++                all_identical = all(
++                    (ds[dim].values == first_ds[dim].values).all()
++                    for ds in datasets[1:]
++                )
++                identical_coords[dim] = all_identical
++
+         try:
+             combined = concat(datasets, dim=concat_dim, data_vars=data_vars,
+                               coords=coords, fill_value=fill_value)
++
++            # Skip monotonic check for dimensions with identical coordinates
++            for dim, is_identical in identical_coords.items():
++                if is_identical:
++                    continue
++                indexes = combined.indexes.get(dim)
++                if not (indexes.is_monotonic_increasing or indexes.is_monotonic_decreasing):
++                    raise ValueError("Resulting object does not have monotonic"
++                                   " global indexes along dimension {}"
++                                   .format(dim))
+         except ValueError as err:
+             if "encountered unexpected variable" in str(err):
+                 raise ValueError("These objects cannot be combined using only "
+@@ -501,8 +541,19 @@ def combine_by_coords(datasets, compat='no_conflicts', data_vars='all',
+                                    fill_value=fill_value)
+ 
+         # Check the overall coordinates are monotonically increasing
++        # Skip check for dimensions where coordinates are identical across all datasets
+         for dim in concatenated.dims:
+             if dim in concatenated:
++                # Check if coordinates are identical across all datasets
++                first_coord = datasets[0][dim].values
++                all_identical = all(
++                    (ds[dim].values == first_coord).all()
++                    for ds in datasets[1:]
++                )
++                if all_identical:
++                    continue
++
++                # Only check monotonicity if coordinates are not identical
+                 indexes = concatenated.indexes.get(dim)
+                 if not (indexes.is_monotonic_increasing
+                         or indexes.is_monotonic_decreasing):
+diff --git a/xarray/core/concat.py b/xarray/core/concat.py
+index cd59d878..0a65f355 100644
+--- a/xarray/core/concat.py
++++ b/xarray/core/concat.py
+@@ -225,11 +225,27 @@ def _dataset_concat(datasets, dim, data_vars, coords, compat, positions,
+     dim, coord = _calc_concat_dim_coord(dim)
+     # Make sure we're working on a copy (we'll be loading variables)
+     datasets = [ds.copy() for ds in datasets]
++    # Check for identical coordinates across all datasets
++    identical_coords = {}
++    first_ds = datasets[0]
++    for dim_name in first_ds.dims:
++        if dim_name in first_ds:
++            all_identical = all(
++                (ds[dim_name].values == first_ds[dim_name].values).all()
++                for ds in datasets[1:]
++            )
++            identical_coords[dim_name] = all_identical
++
+     datasets = align(*datasets, join='outer', copy=False, exclude=[dim],
+                      fill_value=fill_value)
+ 
+     concat_over, equals = _calc_concat_over(datasets, dim, data_vars, coords)
+ 
++    # Skip monotonic check for dimensions with identical coordinates
++    for dim_name, is_identical in identical_coords.items():
++        if is_identical and dim_name in concat_over:
++            concat_over.remove(dim_name)
++
+     def insert_result_variable(k, v):
+         assert isinstance(v, Variable)
+         if k in datasets[0].coords:
+2025-01-15 23:04:13,974 - INFO - Grading answer for pydata__xarray-3151...
+2025-01-15 23:04:13,978 - INFO - report: {'pydata__xarray-3151': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['xarray/tests/test_combine.py::TestCombineAuto::test_combine_leaving_bystander_dimensions']}, 'PASS_TO_PASS': {'success': ['xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_1d', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_2d', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_3d', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_single_dataset', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_redundant_nesting', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_ignore_empty_list', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_uneven_depth_input', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_uneven_length_input', 'xarray/tests/test_combine.py::TestTileIDsFromNestedList::test_infer_from_datasets', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_1d', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_2d', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_no_dimension_coords', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_coord_not_monotonic', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_coord_monotonically_decreasing', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_no_concatenation_needed', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_2d_plus_bystander_dim', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_string_coords', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_lexicographic_sort_string_coords', 'xarray/tests/test_combine.py::TestTileIDsFromCoords::test_datetime_coords', 'xarray/tests/test_combine.py::TestNewTileIDs::test_new_tile_id[old_id0-new_id0]', 'xarray/tests/test_combine.py::TestNewTileIDs::test_new_tile_id[old_id1-new_id1]', 'xarray/tests/test_combine.py::TestNewTileIDs::test_new_tile_id[old_id2-new_id2]', 'xarray/tests/test_combine.py::TestNewTileIDs::test_new_tile_id[old_id3-new_id3]', 'xarray/tests/test_combine.py::TestNewTileIDs::test_new_tile_id[old_id4-new_id4]', 'xarray/tests/test_combine.py::TestNewTileIDs::test_get_new_tile_ids', 'xarray/tests/test_combine.py::TestCheckShapeTileIDs::test_check_depths', 'xarray/tests/test_combine.py::TestCheckShapeTileIDs::test_check_lengths', 'xarray/tests/test_combine.py::TestManualCombine::test_empty_input', 'xarray/tests/test_combine.py::TestManualCombine::test_invalid_hypercube_input', 'xarray/tests/test_combine.py::TestCombineAuto::test_combine_by_coords_still_fails', 'xarray/tests/test_combine.py::TestCombineAuto::test_combine_by_coords_no_concat', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_previously_failed', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_still_fails', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_no_concat', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_order_by_appearance_not_coords', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_fill_value[fill_value0]', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_fill_value[2]', 'xarray/tests/test_combine.py::TestAutoCombineOldAPI::test_auto_combine_fill_value[2.0]', 'xarray/tests/test_combine.py::TestAutoCombineDeprecation::test_auto_combine_with_concat_dim', 'xarray/tests/test_combine.py::TestAutoCombineDeprecation::test_auto_combine_with_merge_and_concat', 'xarray/tests/test_combine.py::TestAutoCombineDeprecation::test_auto_combine_with_coords', 'xarray/tests/test_combine.py::TestAutoCombineDeprecation::test_auto_combine_without_coords'], 'failure': ['xarray/tests/test_combine.py::TestCombineND::test_concat_once[dim1]', 'xarray/tests/test_combine.py::TestCombineND::test_concat_once[new_dim]', 'xarray/tests/test_combine.py::TestCombineND::test_concat_only_first_dim', 'xarray/tests/test_combine.py::TestCombineND::test_concat_twice[dim1]', 'xarray/tests/test_combine.py::TestCombineND::test_concat_twice[new_dim]', 'xarray/tests/test_combine.py::TestManualCombine::test_manual_concat', 'xarray/tests/test_combine.py::TestManualCombine::test_manual_concat_along_new_dim', 'xarray/tests/test_combine.py::TestManualCombine::test_manual_merge', 'xarray/tests/test_combine.py::TestManualCombine::test_concat_multiple_dims', 'xarray/tests/test_combine.py::TestManualCombine::test_concat_name_symmetry', 'xarray/tests/test_combine.py::TestManualCombine::test_concat_one_dim_merge_another', 'xarray/tests/test_combine.py::TestManualCombine::test_auto_combine_2d', 'xarray/tests/test_combine.py::TestManualCombine::test_manual_combine_missing_data_new_dim', 'xarray/tests/test_combine.py::TestManualCombine::test_merge_one_dim_concat_another', 'xarray/tests/test_combine.py::TestManualCombine::test_combine_concat_over_redundant_nesting', 'xarray/tests/test_combine.py::TestManualCombine::test_manual_combine_but_need_auto_combine', 'xarray/tests/test_combine.py::TestManualCombine::test_combine_nested_fill_value[fill_value0]', 'xarray/tests/test_combine.py::TestManualCombine::test_combine_nested_fill_value[2]', 'xarray/tests/test_combine.py::TestManualCombine::test_combine_nested_fill_value[2.0]', 'xarray/tests/test_combine.py::TestCombineAuto::test_combine_by_coords', 'xarray/tests/test_combine.py::TestCombineAuto::test_infer_order_from_coords', 'xarray/tests/test_combine.py::TestCombineAuto::test_combine_by_coords_previously_failed', 'xarray/tests/test_combine.py::TestCombineAuto::test_check_for_impossible_ordering']}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for pydata__xarray-3151: resolved: False
+2025-01-15 23:04:13,978 - INFO - Attempting to stop container sweb.eval.pydata__xarray-3151.20250115_225855...
+2025-01-15 23:04:29,166 - INFO - Attempting to remove container sweb.eval.pydata__xarray-3151.20250115_225855...
+2025-01-15 23:04:29,200 - INFO - Container sweb.eval.pydata__xarray-3151.20250115_225855 removed.

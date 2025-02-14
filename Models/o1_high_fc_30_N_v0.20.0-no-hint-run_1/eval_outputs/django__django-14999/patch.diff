@@ -1,0 +1,101 @@
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index 982816be3a..f0123c1a0d 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -322,6 +322,18 @@ class RenameModel(ModelOperation):
+             old_model = from_state.apps.get_model(app_label, self.old_name)
+             # Move the main table
+             schema_editor.alter_db_table(
++            if 'db_table' in old_model._meta.original_attrs:
++                return
++
++            # If there's a custom db_table, skip rename
++            if 'db_table' in old_model._meta.original_attrs:
++                return
++                if 'db_table' in old_model._meta.original_attrs:
++                    return
++
++        if 'db_table' in old_model._meta.original_attrs:
++            return
++
+                 new_model,
+                 old_model._meta.db_table,
+                 new_model._meta.db_table,
+diff --git a/rename_bug_repro.py b/rename_bug_repro.py
+new file mode 100644
+index 0000000000..500417ecba
+--- /dev/null
++++ b/rename_bug_repro.py
+@@ -0,0 +1,72 @@
++import sys
++
++# This script will reproduce the bug described: when a RenameModel operation
++# attempts to rename a model that has a custom db_table, Django still tries to
++# rename the table, dropping foreign key constraints in some backends.
++# The desired behavior is that if a model's db_table is defined, then a RenameModel
++# operation should effectively do nothing.
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }},
++    INSTALLED_APPS=[],
++)
++
++django.setup()
++
++from django.db import connection, migrations, models
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState
++
++
++def make_migration_plan():
++    project_state = ProjectState()
++
++    # Create a model with a custom db_table.
++    create_op = migrations.CreateModel(
++        name='Foo',
++        fields=[
++            ('id', models.AutoField(primary_key=True))
++        ],
++        options={'db_table': 'my_custom_table'},
++    )
++
++    # Then rename it to Bar.
++    rename_op = migrations.RenameModel(
++        old_name='Foo',
++        new_name='Bar'
++    )
++
++    # We'll put them into a single Migration object.
++    migration = migrations.Migration('test_migration', 'test_app')
++    migration.operations = [create_op, rename_op]
++
++    # Build a new state from the operations.
++    new_state = project_state.clone()
++    for op in migration.operations:
++        op.state_forwards(migration.app_label, new_state)
++
++    # Apply them in-memory.
++    with connection.schema_editor(atomic=True) as schema_editor:
++        for op in migration.operations:
++            op.database_forwards(migration.app_label, schema_editor, project_state, new_state)
++
++    print("Migration plan applied successfully!")
++
++
++def main():
++    try:
++        make_migration_plan()
++        print("If the table was renamed instead of doing nothing, the bug is present.")
++        print("Otherwise, no problem encountered.")
++    except Exception as e:
++        print("An error occurred, which may indicate the bug:", e)
++        sys.exit(1)
++
++if __name__ == '__main__':
++    main()

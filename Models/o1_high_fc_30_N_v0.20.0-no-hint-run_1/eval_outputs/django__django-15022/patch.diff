@@ -1,0 +1,151 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 66f3396a6b..e74b40d089 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -1031,6 +1031,7 @@ class ModelAdmin(BaseModelAdmin):
+         if search_fields and search_term:
+             orm_lookups = [construct_search(str(search_field))
+                            for search_field in search_fields]
++            bits_q = models.Q()
+             for bit in smart_split(search_term):
+                 if bit.startswith(('"', "'")) and bit[0] == bit[-1]:
+                     bit = unescape_string_literal(bit)
+@@ -1038,7 +1039,8 @@ class ModelAdmin(BaseModelAdmin):
+                     *((orm_lookup, bit) for orm_lookup in orm_lookups),
+                     _connector=models.Q.OR,
+                 )
+-                queryset = queryset.filter(or_queries)
++                bits_q &= or_queries
++            queryset = queryset.filter(bits_q)
+             may_have_duplicates |= any(
+                 lookup_spawns_duplicates(self.opts, search_spec)
+                 for search_spec in orm_lookups
+diff --git a/myapp/__init__.py b/myapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/myapp/apps.py b/myapp/apps.py
+new file mode 100644
+index 0000000000..878214a617
+--- /dev/null
++++ b/myapp/apps.py
+@@ -0,0 +1,5 @@
++from django.apps import AppConfig
++
++class MyappConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'myapp'
+\ No newline at end of file
+diff --git a/myapp/models.py b/myapp/models.py
+new file mode 100644
+index 0000000000..49bd239f3b
+--- /dev/null
++++ b/myapp/models.py
+@@ -0,0 +1,11 @@
++from django.db import models
++
++class Client(models.Model):
++    name = models.CharField(max_length=256)
++    name2 = models.CharField(max_length=256, blank=True, null=True)
++    contact_person = models.CharField(max_length=256, blank=True, null=True)
++
++class ClientOffice(models.Model):
++    name = models.CharField(max_length=256)
++    name2 = models.CharField(max_length=256, blank=True, null=True)
++    client = models.ForeignKey(Client, on_delete=models.CASCADE)
+diff --git a/repro_script.py b/repro_script.py
+new file mode 100644
+index 0000000000..aa32d71626
+--- /dev/null
++++ b/repro_script.py
+@@ -0,0 +1,91 @@
++import os
++import django
++from django.conf import settings
++
++# Minimal Django settings for an in-memory test.
++settings.configure(
++    SECRET_KEY='secret-key',
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++        'django.contrib.staticfiles',
++        'myapp',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++    ],
++)
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.contrib.admin.sites import AdminSite
++
++# "Mock" or minimal model for demonstration.
++class Client(models.Model):
++    name = models.CharField(max_length=256)
++    name2 = models.CharField(max_length=256, blank=True, null=True)
++    contact_person = models.CharField(max_length=256, blank=True, null=True)
++
++
++class ClientOffice(models.Model):
++    name = models.CharField(max_length=256)
++    name2 = models.CharField(max_length=256, blank=True, null=True)
++    client = models.ForeignKey(Client, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'admin'
++
++
++# Mimic the admin searches described in the PR.
++class ClientAdmin(admin.ModelAdmin):
++    search_fields = ('name', 'name2', 'contact_person', 'clientoffice__name', 'clientoffice__name2')
++
++
++# We'll create the DB and add some data.
++
++from django.core.management import call_command
++
++call_command('migrate', verbosity=0)
++
++# Register our admin with a mock site.
++site = AdminSite()
++site.register(Client, ClientAdmin)
++site.register(ClientOffice)
++
++# Create test data.
++clientA = Client.objects.create(name="Acme", name2="Acme Co.", contact_person="John Doe")
++ClientOffice.objects.create(name="Main Office", name2="HQ", client=clientA)
++ClientOffice.objects.create(name="NY Branch", name2="", client=clientA)
++
++clientB = Client.objects.create(name="Beta LLC", name2="", contact_person="Jane Smith")
++ClientOffice.objects.create(name="London Branch", name2="", client=clientB)
++
++# Now let's do a search query with multiple words.
++# Typically the admin calls ModelAdmin.get_search_results.
++# We'll see the SQL or attempt to see if it stalls.
++
++ma = ClientAdmin(Client, site)
++qs = Client.objects.all()
++
++search_term = "acme main office test"  # multiple words.
++
++queryset, may_have_duplicates = ma.get_search_results(None, qs, search_term)
++
++print(f"Search: '{search_term}' -> {queryset.count()} results. Duplicates? {may_have_duplicates}")
++
++# This script won't necessarily stall in an in-memory DB with minimal data.
++# But it demonstrates the multiple filter calls that could cause performance issues with large data.
++
++print("Finished repro script.")

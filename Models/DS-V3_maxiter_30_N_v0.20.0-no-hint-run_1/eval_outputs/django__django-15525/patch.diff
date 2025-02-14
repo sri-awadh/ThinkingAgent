@@ -1,0 +1,79 @@
+diff --git a/django/core/serializers/base.py b/django/core/serializers/base.py
+index da85cb4b92..09eddc6666 100644
+--- a/django/core/serializers/base.py
++++ b/django/core/serializers/base.py
+@@ -338,9 +338,22 @@ def build_instance(Model, data, db):
+     ):
+         natural_key = Model(**data).natural_key()
+         try:
+-            data[Model._meta.pk.attname] = Model._meta.pk.to_python(
+-                default_manager.db_manager(db).get_by_natural_key(*natural_key).pk
+-            )
++            # Ensure we're using the correct database connection
++            manager = default_manager.db_manager(db)
++            instance = manager.get_by_natural_key(*natural_key)
++            data[Model._meta.pk.attname] = Model._meta.pk.to_python(instance.pk)
++
++            # For foreign key fields using natural keys, ensure they're resolved
++            # using the correct database
++            for field in Model._meta.get_fields():
++                if field.is_relation and field.remote_field:
++                    if field.name in data and isinstance(data[field.name], (list, tuple)):
++                        try:
++                            related_manager = field.remote_field.model._default_manager.db_manager(db)
++                            related_instance = related_manager.get_by_natural_key(*data[field.name])
++                            data[field.name] = related_instance.pk
++                        except field.remote_field.model.DoesNotExist:
++                            pass
+         except Model.DoesNotExist:
+             pass
+     return Model(**data)
+@@ -387,22 +400,39 @@ def deserialize_fk_value(field, field_value, using, handle_forward_references):
+     model = field.remote_field.model
+     default_manager = model._default_manager
+     field_name = field.remote_field.field_name
++
++    # Handle natural key resolution with proper database connection
+     if (
+         hasattr(default_manager, "get_by_natural_key")
+         and hasattr(field_value, "__iter__")
+         and not isinstance(field_value, str)
+     ):
+         try:
+-            obj = default_manager.db_manager(using).get_by_natural_key(*field_value)
++            # Use the specified database connection
++            manager = default_manager.db_manager(using)
++            obj = manager.get_by_natural_key(*field_value)
++
++            # If the related model has a natural key that depends on another FK,
++            # ensure we resolve it using the correct database
++            if hasattr(obj, 'natural_key'):
++                for f in obj._meta.get_fields():
++                    if f.is_relation and f.remote_field:
++                        if hasattr(f, 'natural_key') and isinstance(getattr(obj, f.name), (list, tuple)):
++                            try:
++                                related_manager = f.remote_field.model._default_manager.db_manager(using)
++                                related_obj = related_manager.get_by_natural_key(*getattr(obj, f.name))
++                                setattr(obj, f.attname, related_obj.pk)
++                            except f.remote_field.model.DoesNotExist:
++                                if not handle_forward_references:
++                                    raise
++            value = getattr(obj, field_name)
++            # If this is a natural foreign key to an object that has a FK/O2O as
++            # the foreign key, use the FK value.
++            if model._meta.pk.remote_field:
++                value = value.pk
++            return value
+         except ObjectDoesNotExist:
+             if handle_forward_references:
+                 return DEFER_FIELD
+-            else:
+-                raise
+-        value = getattr(obj, field_name)
+-        # If this is a natural foreign key to an object that has a FK/O2O as
+-        # the foreign key, use the FK value.
+-        if model._meta.pk.remote_field:
+-            value = value.pk
+-        return value
++            raise
+     return model._meta.get_field(field_name).to_python(field_value)

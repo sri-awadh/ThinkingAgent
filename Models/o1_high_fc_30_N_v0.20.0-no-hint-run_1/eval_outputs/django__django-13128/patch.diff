@@ -1,0 +1,128 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..bdf70e3d86 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -430,6 +430,51 @@ class CombinedExpression(SQLiteNumericMixin, Expression):
+         self.lhs = lhs
+         self.rhs = rhs
+
++    def _resolve_output_field(self):
++        source_list = [s for s in self.get_source_fields() if s is not None]
++        if not source_list:
++            return None
++        # Check if we have a date/time field mixed with a duration.
++        datetime_fields = {'DateField', 'DateTimeField', 'TimeField'}
++        has_dt = any(f.__class__.__name__ in datetime_fields for f in source_list)
++        has_dur = any(f.__class__.__name__ == 'DurationField' for f in source_list)
++        # If there's a date/time + duration mix, skip the normal type-check
++        # and let resolve_expression() pick the right output_field.
++        if has_dt and has_dur:
++            return None
++        # Otherwise, fall back to the base logic.
++        return super()._resolve_output_field()
++
++
++    def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
++        c = super().resolve_expression(query, allow_joins, reuse, summarize, for_save)
++        if c.output_field is None:
++            try:
++                lhs_type = c.lhs.output_field.get_internal_type()
++            except FieldError:
++                lhs_type = None
++            try:
++                rhs_type = c.rhs.output_field.get_internal_type()
++            except FieldError:
++                rhs_type = None
++
++            datetime_fields = {'DateField', 'DateTimeField', 'TimeField'}
++
++            # DateTime - DateTime => Duration
++            if c.connector == c.SUB and lhs_type in datetime_fields and lhs_type == rhs_type:
++                c.output_field = fields.DurationField()
++            # DateTime +/- Duration => DateTime
++            elif c.connector in (c.ADD, c.SUB) and lhs_type in datetime_fields and rhs_type == 'DurationField':
++                c.output_field = c.lhs.output_field
++            # Duration +/- DateTime => DateTime
++            elif c.connector in (c.ADD, c.SUB) and lhs_type == 'DurationField' and rhs_type in datetime_fields:
++                c.output_field = c.rhs.output_field
++            # Duration +/- Duration => Duration
++            elif lhs_type == 'DurationField' and rhs_type == 'DurationField':
++                c.output_field = fields.DurationField()
++
++        return c
++
+     def __repr__(self):
+         return "<{}: {}>".format(self.__class__.__name__, self)
+
+@@ -453,8 +498,7 @@ class CombinedExpression(SQLiteNumericMixin, Expression):
+             rhs_type = None
+         if (
+             not connection.features.has_native_duration_field and
+-            'DurationField' in {lhs_type, rhs_type} and
+-            lhs_type != rhs_type
++            'DurationField' in {lhs_type, rhs_type}
+         ):
+             return DurationExpression(self.lhs, self.connector, self.rhs).as_sql(compiler, connection)
+         datetime_fields = {'DateField', 'DateTimeField', 'TimeField'}
+@@ -522,6 +566,9 @@ class TemporalSubtraction(CombinedExpression):
+         return connection.ops.subtract_temporals(self.lhs.output_field.get_internal_type(), lhs, rhs)
+
+
++    def get_source_fields(self):
++        return [self.output_field]
++
+ @deconstructible
+ class F(Combinable):
+     """An object capable of resolving references to existing query objects."""
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..3f4cddfd5b
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,46 @@
++import datetime
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Value
++from django.db.models.functions import Cast
++from django.db.models import DurationField
++
++# Configure an in-memory database for testing.
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='secret',
++    INSTALLED_APPS=[__name__],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++import django
++from django.core.management import call_command
++
++django.setup()
++
++class Experiment(models.Model):
++    start = models.DateTimeField()
++    end = models.DateTimeField()
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Create some test data
++obj = Experiment.objects.create(
++    start=datetime.datetime(2023, 1, 1, 12, 0, 0),
++    end=datetime.datetime(2023, 1, 1, 14, 0, 0)
++)
++
++# Trigger the expression that was failing
++qs = Experiment.objects.annotate(
++    delta=F('end') - F('start') + Value(datetime.timedelta(minutes=30), output_field=DurationField())
++)
++
++print("Result:", qs.first().delta)

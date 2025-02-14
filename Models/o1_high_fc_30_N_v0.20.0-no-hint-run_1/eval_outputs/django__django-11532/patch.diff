@@ -1,0 +1,53 @@
+diff --git a/django/core/mail/message.py b/django/core/mail/message.py
+index e393b4cf5c..01f52c9edc 100644
+--- a/django/core/mail/message.py
++++ b/django/core/mail/message.py
+@@ -257,7 +257,12 @@ class EmailMessage:
+             msg['Date'] = formatdate(localtime=settings.EMAIL_USE_LOCALTIME)
+         if 'message-id' not in header_names:
+             # Use cached DNS_NAME for performance
+-            msg['Message-ID'] = make_msgid(domain=DNS_NAME)
++            domain_for_message_id = str(DNS_NAME)
++            try:
++                domain_for_message_id = domain_for_message_id.encode('idna').decode('ascii')
++            except UnicodeError:
++                pass
++            msg['Message-ID'] = make_msgid(domain=domain_for_message_id)
+         for name, value in self.extra_headers.items():
+             if name.lower() != 'from':  # From is already handled
+                 msg[name] = value
+diff --git a/test_reproduce.py b/test_reproduce.py
+new file mode 100644
+index 0000000000..8e436e08d8
+--- /dev/null
++++ b/test_reproduce.py
+@@ -0,0 +1,29 @@
++import django
++from django.conf import settings
++from unittest.mock import patch
++from django.core.mail import EmailMessage
++
++if not settings.configured:
++    settings.configure(
++        EMAIL_USE_LOCALTIME=False,
++        DEFAULT_CHARSET='utf-8',
++        DEFAULT_FROM_EMAIL='from@example.com',
++        INSTALLED_APPS=[],
++    )
++django.setup()
++
++if __name__ == "__main__":
++    # Attempt to reproduce the reported issue:
++    # non-ASCII domain in DNS_NAME while using non-unicode encoding.
++    # Expected behavior: encode domain via punycode so that it doesn't crash.
++
++    try:
++        with patch("django.core.mail.message.DNS_NAME", "漢字"):
++            email = EmailMessage('subject', '', 'from@example.com', ['to@example.com'])
++            # Note: iso-8859-1 can't encode '漢字', so this triggers the error
++            email.encoding = 'iso-8859-1'
++            msg = email.message()
++            print("Created Email Message successfully!")
++            print("Message-ID:", msg['Message-ID'])
++    except Exception as e:
++        print("Error encountered:", e)

@@ -1,0 +1,123 @@
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 00000000..992f7f42
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,13 @@
++import requests
++from requests.auth import HTTPDigestAuth
++
++def main():
++    url = 'http://localhost:8000/'
++    auth = HTTPDigestAuth('user', 'passwd')
++    response = requests.get(url, auth=auth)
++    print(f'Status Code: {response.status_code}')
++    print('Response Headers:')
++    print(response.headers)
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file
+diff --git a/requests/auth.py b/requests/auth.py
+index a3de123d..07662127 100644
+--- a/requests/auth.py
++++ b/requests/auth.py
+@@ -144,7 +144,7 @@ class HTTPDigestAuth(AuthBase):
+         if entdig:
+             base += ', digest="%s"' % entdig
+         if qop:
+-            base += ', qop=auth, nc=%s, cnonce="%s"' % (ncvalue, cnonce)
++            base += ', qop=%s, nc=%s, cnonce="%s"' % (qop, ncvalue, cnonce)
+
+         return 'Digest %s' % (base)
+
+diff --git a/test_server.log b/test_server.log
+new file mode 100644
+index 00000000..5273c57f
+--- /dev/null
++++ b/test_server.log
+@@ -0,0 +1,21 @@
++Starting test server on port 8000...
++127.0.0.1 - - [15/Jan/2025 19:27:53] "GET / HTTP/1.1" 401 -
++----------------------------------------
++Exception occurred during processing of request from ('127.0.0.1', 38818)
++Traceback (most recent call last):
++  File "/opt/miniconda3/envs/testbed/lib/python3.9/socketserver.py", line 316, in _handle_request_noblock
++    self.process_request(request, client_address)
++  File "/opt/miniconda3/envs/testbed/lib/python3.9/socketserver.py", line 347, in process_request
++    self.finish_request(request, client_address)
++  File "/opt/miniconda3/envs/testbed/lib/python3.9/socketserver.py", line 360, in finish_request
++    self.RequestHandlerClass(request, client_address, self)
++  File "/opt/miniconda3/envs/testbed/lib/python3.9/socketserver.py", line 747, in __init__
++    self.handle()
++  File "/opt/miniconda3/envs/testbed/lib/python3.9/http/server.py", line 433, in handle
++    self.handle_one_request()
++  File "/opt/miniconda3/envs/testbed/lib/python3.9/http/server.py", line 421, in handle_one_request
++    method()
++  File "/workspace/psf__requests__2.0/test_server.py", line 35, in do_GET
++    response = hashlib.md5(f"{ha1}:{auth['nonce']}:{auth['nc']}:{auth['cnonce']}:{auth['qop']}:{ha2}".encode()).hexdigest()
++KeyError: 'nc'
++----------------------------------------
+diff --git a/test_server.py b/test_server.py
+new file mode 100644
+index 00000000..9b54b760
+--- /dev/null
++++ b/test_server.py
+@@ -0,0 +1,56 @@
++from http.server import HTTPServer, BaseHTTPRequestHandler
++from http import HTTPStatus
++import hashlib
++import re
++
++USERNAME = 'user'
++PASSWORD = 'passwd'
++REALM = 'TestRealm'
++NONCE = 'randomnonce'
++OPAQUE = 'randomopaque'
++
++def parse_authorization(header):
++    auth_type, auth_info = header.split(' ', 1)
++    if auth_type.lower() != 'digest':
++        return None
++    auth_dict = {}
++    for item in re.findall(r'(\w+)="([^"]+)"', auth_info):
++        auth_dict[item[0]] = item[1]
++    return auth_dict
++
++class DigestAuthHandler(BaseHTTPRequestHandler):
++    def do_GET(self):
++        auth_header = self.headers.get('Authorization')
++        if not auth_header:
++            self.send_auth_request()
++            return
++
++        auth = parse_authorization(auth_header)
++        if not auth:
++            self.send_auth_request()
++            return
++
++        ha1 = hashlib.md5(f"{USERNAME}:{REALM}:{PASSWORD}".encode()).hexdigest()
++        ha2 = hashlib.md5(f"{self.command}:{self.path}".encode()).hexdigest()
++        response = hashlib.md5(f"{ha1}:{auth['nonce']}:{auth['nc']}:{auth['cnonce']}:{auth['qop']}:{ha2}".encode()).hexdigest()
++
++        if auth.get('response') == response:
++            self.send_response(HTTPStatus.OK)
++            self.end_headers()
++            self.wfile.write(b'Authenticated successfully!')
++        else:
++            self.send_auth_request()
++
++    def send_auth_request(self):
++        self.send_response(HTTPStatus.UNAUTHORIZED)
++        self.send_header('WWW-Authenticate', f'Digest realm="{REALM}", nonce="{NONCE}", opaque="{OPAQUE}", qop="auth"')
++        self.end_headers()
++
++def run(server_class=HTTPServer, handler_class=DigestAuthHandler, port=8000):
++    server_address = ('', port)
++    httpd = server_class(server_address, handler_class)
++    print(f'Starting test server on port {port}...')
++    httpd.serve_forever()
++
++if __name__ == '__main__':
++    run()
+\ No newline at end of file

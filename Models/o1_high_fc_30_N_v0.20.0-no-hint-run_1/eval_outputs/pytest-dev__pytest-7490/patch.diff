@@ -1,0 +1,100 @@
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 000000000..94ac34d99
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,11 @@
++import subprocess
++
++if __name__ == "__main__":
++    with open("test_foo.py", "w") as f:
++        f.write("import pytest\n\n")
++        f.write("def test_xfail_test(request):\n")
++        f.write("    mark = pytest.mark.xfail(reason=\"dynamic xfail\")\n")
++        f.write("    request.node.add_marker(mark)\n")
++        f.write("    assert 0\n")
++
++    subprocess.run(["pytest", "test_foo.py"])
+\ No newline at end of file
+diff --git a/src/_pytest/skipping.py b/src/_pytest/skipping.py
+index 335e10996..d7c5ae31b 100644
+--- a/src/_pytest/skipping.py
++++ b/src/_pytest/skipping.py
+@@ -246,21 +246,27 @@ def pytest_runtest_setup(item: Item) -> None:
+
+ @hookimpl(hookwrapper=True)
+ def pytest_runtest_call(item: Item) -> Generator[None, None, None]:
+-    xfailed = item._store.get(xfailed_key, None)
+-    if xfailed is None:
+-        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+-
+-    if not item.config.option.runxfail:
+-        if xfailed and not xfailed.run:
+-            xfail("[NOTRUN] " + xfailed.reason)
+-
+     yield
+
+-
++    if not item.config.option.runxfail:
++        # re-check if xfail was dynamically added
++        xfailed = evaluate_xfail_marks(item)
++        if xfailed:
++            xfail(f"[Dynamically added xfail after test execution] {xfailed.reason}")
+ @hookimpl(hookwrapper=True)
+ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+     outcome = yield
+     rep = outcome.get_result()
++
++    # If the test fails at call time, check if xfail was dynamically added.
++    # If so, report as xfail instead of failure.
++    if rep.when == "call" and rep.failed and not item.config.option.runxfail:
++        xfailed_new = evaluate_xfail_marks(item)
++        if xfailed_new:
++            rep.outcome = "skipped"
++            rep.wasxfail = xfailed_new.reason
++
++
+     xfailed = item._store.get(xfailed_key, None)
+     # unittest special case, see setting of unexpectedsuccess_key
+     if unexpectedsuccess_key in item._store and rep.when == "call":
+@@ -290,6 +296,14 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+                 rep.longrepr = "[XPASS(strict)] " + xfailed.reason
+             else:
+                 rep.outcome = "passed"
++    # Check if test has just failed with an AssertionError
++    # and re-evaluate the markers in case an xfail was dynamically added.
++    if rep.failed and call.excinfo and isinstance(call.excinfo.value, AssertionError):
++        xfailed_new = evaluate_xfail_marks(item)
++        if xfailed_new:
++            rep.outcome = "skipped"
++            rep.wasxfail = xfailed_new.reason
++
+                 rep.wasxfail = xfailed.reason
+
+     if (
+@@ -310,6 +324,13 @@ def pytest_report_teststatus(report: BaseReport) -> Optional[Tuple[str, str, str
+     if hasattr(report, "wasxfail"):
+         if report.skipped:
+             return "xfailed", "x", "XFAIL"
++    # Fix for dynamically added xfail in test body
++    if rep.failed and call.excinfo and isinstance(call.excinfo.value, AssertionError):
++        xfailed = evaluate_xfail_marks(item)
++        if xfailed:
++            rep.outcome = "skipped"
++            rep.wasxfail = xfailed.reason
++
+         elif report.passed:
+             return "xpassed", "X", "XPASS"
+     return None
+diff --git a/test_foo.py b/test_foo.py
+new file mode 100644
+index 000000000..d18fa3602
+--- /dev/null
++++ b/test_foo.py
+@@ -0,0 +1,6 @@
++import pytest
++
++def test_xfail_test(request):
++    mark = pytest.mark.xfail(reason="dynamic xfail")
++    request.node.add_marker(mark)
++    assert 0

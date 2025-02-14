@@ -1,0 +1,142 @@
+diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py
+index ac0b62d0bf..7073cb92d6 100644
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -14,7 +14,46 @@ __all__ = [
+
+
+ class Aggregate(Func):
+-    template = '%(function)s(%(distinct)s%(expressions)s)'
++    template = '%(function)s(%(expressions)s)'
++
++    def as_sql(self, compiler, connection, **extra_context):
++        # If a filter is present and the DB supports FILTER, handle that.
++        if self.filter:
++            if connection.features.supports_aggregate_filter_clause:
++                filter_sql, filter_params = self.filter.as_sql(compiler, connection)
++                template = self.filter_template % extra_context.get('template', self.template)
++                sql, params = super().as_sql(
++                    compiler,
++                    connection,
++                    template=template,
++                    filter=filter_sql,
++                    **extra_context
++                )
++                return sql, params + filter_params
++            else:
++                # Fallback: rewrite the expression as a CASE.
++                copy = self.copy()
++                copy.filter = None
++                source_expressions = copy.get_source_expressions()
++                condition = When(self.filter, then=source_expressions[0])
++                copy.set_source_expressions([Case(condition)] + source_expressions[1:])
++                if copy.distinct:
++                    # Force parentheses around the CASE expression to avoid syntax issues.
++                    copy.template = '%(function)s(DISTINCT ( %(expressions)s ))'
++                return copy.as_sql(compiler, connection, **extra_context)
++        # If no filter, just handle distinct.
++        if self.distinct:
++            # Put parentheses around the expression to guarantee a space.
++            return super().as_sql(
++                compiler,
++                connection,
++                template='%(function)s(DISTINCT ( %(expressions)s ))',
++                **extra_context
++            )
++        return super().as_sql(compiler, connection, **extra_context)
++
++
++
+     contains_aggregate = True
+     name = None
+     filter_template = '%s FILTER (WHERE %%(filter)s)'
+@@ -68,13 +107,25 @@ class Aggregate(Func):
+         return []
+
+     def as_sql(self, compiler, connection, **extra_context):
+-        extra_context['distinct'] = 'DISTINCT' if self.distinct else ''
++        if self.distinct:
++            extra_context['distinct_open'] = 'DISTINCT ('
++            extra_context['distinct_close'] = ')'
++        else:
++            extra_context['distinct_open'] = ''
++            extra_context['distinct_close'] = ''
+         if self.filter:
+             if connection.features.supports_aggregate_filter_clause:
+                 filter_sql, filter_params = self.filter.as_sql(compiler, connection)
++    def as_sql(self, compiler, connection, **extra_context):
++        if self.distinct:
++            extra_context['template'] = '%(function)s(DISTINCT ( %(expressions)s ))'
++        return super().as_sql(compiler, connection, **extra_context)
++
+                 template = self.filter_template % extra_context.get('template', self.template)
+                 sql, params = super().as_sql(
+                     compiler, connection, template=template, filter=filter_sql,
++        if self.distinct:
++            copy.template = '%(function)s(DISTINCT (%(expressions)s))'
+                     **extra_context
+                 )
+                 return sql, params + filter_params
+@@ -84,7 +135,9 @@ class Aggregate(Func):
+                 source_expressions = copy.get_source_expressions()
+                 condition = When(self.filter, then=source_expressions[0])
+                 copy.set_source_expressions([Case(condition)] + source_expressions[1:])
+-                return super(Aggregate, copy).as_sql(compiler, connection, **extra_context)
++                if copy.distinct:
++                    copy.template = '%(function)s(DISTINCT (%(expressions)s))'
++                return copy.as_sql(compiler, connection, **extra_context)
+         return super().as_sql(compiler, connection, **extra_context)
+
+     def _get_repr_options(self):
+diff --git a/scripts/reproduce_issue.py b/scripts/reproduce_issue.py
+new file mode 100644
+index 0000000000..5dd39e90a7
+--- /dev/null
++++ b/scripts/reproduce_issue.py
+@@ -0,0 +1,46 @@
++import django
++from django.conf import settings
++
++# Configure a minimal Django settings.
++settings.configure(
++    INSTALLED_APPS=["__main__"],
++    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
++)
++
++import sys
++
++django.setup()
++
++from django.db import models
++
++class MyModel(models.Model):
++    data = models.IntegerField(null=True)
++
++# Create the database table.
++with django.db.connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++# Insert some test data.
++MyModel.objects.create(data=1)
++MyModel.objects.create(data=2)
++MyModel.objects.create(data=None)
++
++from django.db.models import Count, Case, When
++try:
++    # Attempt a query that uses Count with distinct=True and a Case condition.
++    queryset = MyModel.objects.annotate(
++        test_count=Count(
++            Case(
++                When(data__isnull=False, then=1),
++            ),
++            distinct=True
++        )
++    )
++    print("Query executed successfully.")
++
++    print("SQL Query:", queryset.query)
++
++    print("Got test_count:", queryset[0].test_count)
++except Exception as e:
++    print("Encountered error while executing the query:", e)
++    sys.exit(1)

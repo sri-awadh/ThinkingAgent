@@ -1,0 +1,70 @@
+diff --git a/django/db/models/constraints.py b/django/db/models/constraints.py
+index e7f81d3ee9..f3b10142ef 100644
+--- a/django/db/models/constraints.py
++++ b/django/db/models/constraints.py
+@@ -37,6 +37,9 @@ class CheckConstraint(BaseConstraint):
+         where = query.build_where(self.check)
+         compiler = query.get_compiler(connection=schema_editor.connection)
+         sql, params = where.as_sql(compiler, schema_editor.connection)
++        if schema_editor.connection.vendor in ('sqlite','oracle'):
++            import re
++            sql = re.sub(r'"[^\"]+"\.', '', sql)
+         return sql % tuple(schema_editor.quote_value(p) for p in params)
+
+     def constraint_sql(self, model, schema_editor):
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..4da5275be4
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,50 @@
++import os
++import django
++from django.db import connection
++from django.conf import settings
++from django.db import models
++from django.db.models import Q
++
++def main():
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            SECRET_KEY='test',
++            INSTALLED_APPS=['__main__'],
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            }
++        )
++    django.setup()
++
++    class TestConstraint(models.Model):
++        field_1 = models.IntegerField(blank=True, null=True)
++        flag = models.BooleanField(blank=False, null=False)
++        class Meta:
++            app_label = '__main__'
++            constraints = [
++                models.CheckConstraint(
++                    check=(Q(flag__exact=True, field_1__isnull=False) | Q(flag__exact=False)),
++                    name='field_1_has_value_if_flag_set',
++                ),
++            ]
++
++    # Step 1: create the table.
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestConstraint)
++
++    # Step 2: Add the same-named constraint with a slightly different check.
++    # This triggers the DB to do a rename and copy approach.
++    # Because we are referencing the same constraint name, the old one is replaced.
++    with connection.schema_editor() as schema_editor:
++        new_constraint = models.CheckConstraint(
++            check=(Q(field_1__isnull=False, flag__exact=True) | Q(flag__exact=False)),
++            name='field_1_has_value_if_flag_set',
++        )
++        schema_editor.add_constraint(TestConstraint, new_constraint)
++
++if __name__ == '__main__':
++    main()

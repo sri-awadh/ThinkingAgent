@@ -1,0 +1,80 @@
+diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py
+index 8c4eae7906..2acb0b38dd 100644
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -64,8 +64,9 @@ class Aggregate(Func):
+             return c
+         if hasattr(default, 'resolve_expression'):
+             default = default.resolve_expression(query, allow_joins, reuse, summarize)
++        c._default = default
+         c.default = None  # Reset the default argument before wrapping.
+-        return Coalesce(c, default, output_field=c._output_field_or_none)
++        return c
+
+     @property
+     def default_alias(self):
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index d405a203ee..022c759560 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -280,6 +280,10 @@ class SQLCompiler:
+                 else:
+                     sql, params = self.compile(Value(empty_result_set_value))
+             else:
++                if hasattr(col, '_default') and col._default is not None:
++                    d_sql, d_params = self.compile(col._default)
++                    sql = f'COALESCE({sql}, {d_sql})'
++                    params += d_params
+                 sql, params = col.select_format(self, sql, params)
+             ret.append((col, (sql, params), alias))
+         return ret, klass_info, annotations
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..fcfc40767a
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,43 @@
++import sys
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.models import Sum, F
++
++def setup_django():
++    settings.configure(
++        INSTALLED_APPS=["test_reproduce_issue"],
++        DATABASES={
++            "default": {
++                "ENGINE": "django.db.backends.sqlite3",
++                "NAME": ":memory:",
++            }
++        },
++        SECRET_KEY="test",
++    )
++    django.setup()
++
++def main():
++    from django.db import models
++    class Book(models.Model):
++        id = models.AutoField(primary_key=True)
++        class Meta:
++            app_label = "test_reproduce_issue"
++
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Book)
++
++    for i in range(1,6):
++        Book.objects.create(id=i)
++
++    print("Annotated + Aggregated without default:")
++    result_no_default = Book.objects.annotate(idx=F("id")).aggregate(the_sum=Sum("id"))
++    print(" → result:", result_no_default)
++
++    print("\nAnnotated + Aggregated WITH default=0:")
++    result_with_default = Book.objects.annotate(idx=F("id")).aggregate(the_sum=Sum("id", default=0))
++    print(" → result:", result_with_default)
++
++if __name__ == "__main__":
++    setup_django()
++    main()
+\ No newline at end of file

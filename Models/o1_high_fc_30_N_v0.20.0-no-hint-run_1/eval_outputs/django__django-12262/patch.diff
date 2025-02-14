@@ -1,0 +1,103 @@
+diff --git a/django/template/library.py b/django/template/library.py
+index 20bc86dac8..a84b945353 100644
+--- a/django/template/library.py
++++ b/django/template/library.py
+@@ -251,26 +251,23 @@ def parse_bits(parser, bits, params, varargs, varkw, defaults,
+     args = []
+     kwargs = {}
+     unhandled_params = list(params)
+-    unhandled_kwargs = [
+-        kwarg for kwarg in kwonly
+-        if not kwonly_defaults or kwarg not in kwonly_defaults
+-    ]
++    unhandled_kwargs = list(kwonly)
+     for bit in bits:
+         # First we try to extract a potential kwarg from the bit
+         kwarg = token_kwargs([bit], parser)
+         if kwarg:
+             # The kwarg was successfully extracted
+             param, value = kwarg.popitem()
+-            if param not in params and param not in unhandled_kwargs and varkw is None:
+-                # An unexpected keyword argument was supplied
+-                raise TemplateSyntaxError(
+-                    "'%s' received unexpected keyword argument '%s'" %
+-                    (name, param))
+-            elif param in kwargs:
++            if param in kwargs:
+                 # The keyword argument has already been supplied once
+                 raise TemplateSyntaxError(
+                     "'%s' received multiple values for keyword argument '%s'" %
+                     (name, param))
++            elif param not in params and param not in unhandled_kwargs and varkw is None:
++                # An unexpected keyword argument was supplied
++                raise TemplateSyntaxError(
++                    "'%s' received unexpected keyword argument '%s'" %
++                    (name, param))
+             else:
+                 # All good, record the keyword argument
+                 kwargs[str(param)] = value
+@@ -298,11 +295,12 @@ def parse_bits(parser, bits, params, varargs, varkw, defaults,
+                             "'%s' received too many positional arguments" %
+                             name)
+     if defaults is not None:
+-        # Consider the last n params handled, where n is the
+-        # number of defaults.
+         unhandled_params = unhandled_params[:-len(defaults)]
++    if kwonly_defaults:
++        for k in kwonly_defaults:
++            if k in unhandled_kwargs:
++                unhandled_kwargs.remove(k)
+     if unhandled_params or unhandled_kwargs:
+-        # Some positional arguments were not supplied
+         raise TemplateSyntaxError(
+             "'%s' did not receive value(s) for the argument(s): %s" %
+             (name, ", ".join("'%s'" % p for p in unhandled_params + unhandled_kwargs)))
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..421048c94d
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,43 @@
++import sys
++from django.template import Engine, Context
++from django.template.library import Library
++from django.template.exceptions import TemplateSyntaxError
++
++register = Library()
++
++@register.simple_tag
++def hello(*, greeting='hello'):
++    return f"{greeting} world"
++
++@register.simple_tag
++def hi(*, greeting):
++    return f"{greeting} world"
++
++def main():
++    e = Engine()
++    # Register this module as a template library under the name 'test_issue'.
++    e.template_libraries['test_issue'] = register
++
++    print("=== Test 1: Use default argument ===")
++    try:
++        t_default = e.from_string("{% load test_issue %}{% hello %}")
++        print(t_default.render(Context({})))
++    except TemplateSyntaxError as ex:
++        print("ERROR:", ex)
++
++    print("\n=== Test 2: Provide a custom argument ===")
++    try:
++        t_custom = e.from_string("{% load test_issue %}{% hello greeting='hi' %}")
++        print(t_custom.render(Context({})))
++    except TemplateSyntaxError as ex:
++        print("ERROR:", ex)
++
++    print("\n=== Test 3: Duplicate argument (should raise 'multiple values' error) ===")
++    try:
++        t_multiple = e.from_string("{% load test_issue %}{% hi greeting='hi' greeting='hello' %}")
++        print(t_multiple.render(Context({})))
++    except TemplateSyntaxError as ex:
++        print("ERROR:", ex)
++
++if __name__ == "__main__":
++    main()

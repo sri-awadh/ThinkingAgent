@@ -1,0 +1,68 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index c1a76584f0..68fb4f4268 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -869,6 +869,9 @@ class ExpressionWrapper(Expression):
+     def __repr__(self):
+         return "{}({})".format(self.__class__.__name__, self.expression)
+
++    def get_group_by_cols(self, alias=None):
++        return self.expression.get_group_by_cols(alias)
++
+
+ class When(Expression):
+     template = 'WHEN %(condition)s THEN %(result)s'
+diff --git a/reproduce_expr_wrapper_issue.py b/reproduce_expr_wrapper_issue.py
+new file mode 100644
+index 0000000000..0889d5b360
+--- /dev/null
++++ b/reproduce_expr_wrapper_issue.py
+@@ -0,0 +1,48 @@
++import django
++from django.conf import settings
++from django.db import models
++
++# We'll configure a minimal settings for an in-memory sqlite database.
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['*'],
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        '__main__',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    MIDDLEWARE=[],
++    TEMPLATES=[],
++)
++
++django.setup()
++
++class TestModel(models.Model):
++    column_a = models.IntegerField()
++    column_b = models.IntegerField()
++
++# Create the table
++with django.db.connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++# Insert a row
++TestModel.objects.create(column_a=1, column_b=10)
++
++def reproduce_issue():
++    from django.db.models import Value, ExpressionWrapper, IntegerField, Sum
++    qs = TestModel.objects.annotate(
++        expr_res=ExpressionWrapper(Value(3), output_field=IntegerField())
++    ).values('expr_res','column_a').annotate(sum=Sum('column_b'))
++    sql = str(qs.query)
++    print('SQL generated:\n', sql)
++    # We'll see if there's a "GROUP BY ..., 3" in the query.
++
++if __name__ == '__main__':
++    reproduce_issue()

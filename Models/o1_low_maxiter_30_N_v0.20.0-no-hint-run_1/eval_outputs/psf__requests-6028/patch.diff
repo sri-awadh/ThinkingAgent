@@ -1,0 +1,51 @@
+diff --git a/requests/adapters.py b/requests/adapters.py
+index fe22ff45..4e6081b4 100644
+--- a/requests/adapters.py
++++ b/requests/adapters.py
+@@ -498,6 +498,46 @@ class HTTPAdapter(BaseAdapter):
+                     raise
+
+         except (ProtocolError, socket.error) as err:
++def handle_407(self, r, **kwargs):
++    """Takes the given response and tries to handle HTTP 407 (proxy auth) if needed.
++    Similar to how 401 is handled.
++    """
++    # If the response is not 4xx, do not handle here
++    if not 400 <= r.status_code < 500:
++        return r
++
++    if r.status_code != 407:
++        return r
++
++    # Rewind body if possible
++    if getattr(r.request.body, "seek", None):
++        r.request.body.seek(0, 0)
++
++    # Reapply the Proxy-Authorization header if necessary
++    s_auth = r.headers.get('proxy-authenticate', '')
++    if 'basic' in s_auth.lower():
++        from .auth import _basic_auth_str
++        if r.connection and r.request and r.connection.proxy_manager:
++            # If there's a known username, password in the proxies
++            from .utils import get_auth_from_url, select_proxy, prepend_scheme_if_needed
++            proxies = r.request.proxies or {}
++            proxy_url = select_proxy(r.request.url, proxies)
++            if proxy_url:
++                proxy_url = prepend_scheme_if_needed(proxy_url, 'http')
++                username, password = get_auth_from_url(proxy_url)
++                if username and password:
++                    r.request.headers['Proxy-Authorization'] = _basic_auth_str(username, password)
++
++    # Attempt to resend
++    # consume original response
++    r.content
++    r.close()
++
++    prep = r.request.copy()
++    _r = r.connection.send(prep, **kwargs)
++    _r.history.append(r)
++    _r.request = prep
++    return _r
+             raise ConnectionError(err, request=request)
+
+         except MaxRetryError as e:

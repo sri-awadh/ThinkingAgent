@@ -1,0 +1,104 @@
+diff --git a/django/core/handlers/base.py b/django/core/handlers/base.py
+index 8e8c3da06a..7deb19a419 100644
+--- a/django/core/handlers/base.py
++++ b/django/core/handlers/base.py
+@@ -49,6 +49,8 @@ class BaseHandler:
+                 middleware_is_async = False
+             else:
+                 middleware_is_async = middleware_can_async
++            old_handler = handler
++            old_handler_is_async = handler_is_async
+             try:
+                 # Adapt handler, if needed.
+                 handler = self.adapt_method_mode(
+@@ -62,6 +64,8 @@ class BaseHandler:
+                         logger.debug('MiddlewareNotUsed(%r): %s', middleware_path, exc)
+                     else:
+                         logger.debug('MiddlewareNotUsed: %r', middleware_path)
++                handler = old_handler
++                handler_is_async = old_handler_is_async
+                 continue
+
+             if mw_instance is None:
+diff --git a/reproduce_bug.py b/reproduce_bug.py
+new file mode 100644
+index 0000000000..d86fb89995
+--- /dev/null
++++ b/reproduce_bug.py
+@@ -0,0 +1,76 @@
++import sys
++import os
++import django
++from django.conf import settings
++from django.http import HttpResponse
++from django.urls import path
++
++# ensure /workspace is on sys.path so we can import test_middleware
++sys.path.insert(0, '/workspace')
++
++
++def dummy_view(request):
++    return HttpResponse('Hello from dummy view!')
++
++def run():
++    # Intentionally cause an error with the session file path and define some middlewares
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='secret',
++        SESSION_FILE_PATH='/non/existent/path',
++        ROOT_URLCONF=__name__,
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'test_middleware.MiddlewareSkipped',
++            'test_middleware.MiddlewareUsed',
++            'django.contrib.sessions.middleware.SessionMiddleware',
++        ],
++        ALLOWED_HOSTS=['*'],
++    )
++    django.setup()
++
++    global urlpatterns
++    urlpatterns = [
++        path('', dummy_view),
++    ]
++
++    # Try ASGI request cycle
++    from django.core.asgi import get_asgi_application
++    asgi_app = get_asgi_application()
++
++    # Attempt to call the application directly as an ASGI callable
++    # Emulate a minimal ASGI scope
++    scope = {
++        'type': 'http',
++        'method': 'GET',
++        'path': '/',
++        'headers': [],
++    }
++
++    async def mock_receive():
++        return {'type': 'http.request', 'body': b'', 'more_body': False}
++
++    async def mock_send(message):
++        if message['type'] == 'http.response.start':
++            status = message['status']
++            print(f"HTTP status: {status}")
++        elif message['type'] == 'http.response.body':
++            body = message.get('body', b'').decode()
++            print(f"Response body: {body}")
++
++    import asyncio
++
++    try:
++        print("Running ASGI app to reproduce the issue...")
++        loop = asyncio.get_event_loop()
++        loop.run_until_complete(asgi_app(scope, mock_receive, mock_send))
++    except Exception as e:
++        print("Caught exception:", e)
++
++if __name__ == '__main__':
++    run()

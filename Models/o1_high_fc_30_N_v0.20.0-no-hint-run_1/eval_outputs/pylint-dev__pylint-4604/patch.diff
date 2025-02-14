@@ -1,0 +1,70 @@
+diff --git a/pylint/checkers/variables.py b/pylint/checkers/variables.py
+index 3ddafd599..47cb925e6 100644
+--- a/pylint/checkers/variables.py
++++ b/pylint/checkers/variables.py
+@@ -698,6 +698,47 @@ class VariablesChecker(BaseChecker):
+         # Only check variables that are used
+         dummy_rgx = self.config.dummy_variables_rgx
+         assigned_to = [var for var in assigned_to if not dummy_rgx.match(var)]
++    def _import_used_in_type_comment(self, stmt, qname, asname):
++        '''Check if an import is used in a type comment in the module.'''
++        import re
++        import astroid
++        root = stmt.root()
++        if hasattr(root, 'file_bytes') and root.file_bytes:
++            source = root.file_bytes.decode('utf-8', errors='ignore')
++        else:
++            # fallback attempt
++            source = ''
++            mod_file = getattr(root, 'file', None)
++            if mod_file and os.path.exists(mod_file):
++                with open(mod_file, 'r', encoding='utf-8') as f:
++                    source = f.read()
++        if isinstance(stmt, astroid.Import):
++            # If it's a normal import (astroid.Import), we look for fully qualified usage in type comments
++            # e.g. # type: qname.Something
++            pattern = re.compile(r'#\\s*type:\\s.*\\b' + re.escape(qname) + r'(\\b|\\.)')
++            return bool(pattern.search(source))
++        if isinstance(stmt, astroid.ImportFrom):
++            # If it's a from import (astroid.ImportFrom), we look for usage by the imported name.
++            # e.g. from qname import asname => # type: asname
++            name = asname or qname
++            pattern = re.compile(r'#\\s*type:\\s.*\\b' + re.escape(name) + r'\\b')
++            return bool(pattern.search(source))
++
++        source = root.file_bytes.decode('utf-8', errors='ignore')
++        # If it's a normal import (astroid.Import), we look for fully qualified usage in type comments,
++        # e.g. # type: qname.Something
++        if isinstance(stmt, astroid.Import):
++            pattern = re.compile(r'#\s*type:\s.*\b' + re.escape(qname) + r'(\b|\.)')
++            return bool(pattern.search(source))
++
++        # If it's a from import (astroid.ImportFrom), we look for usage by the imported name.
++        # e.g. from qname import asname => # type: asname
++        if isinstance(stmt, astroid.ImportFrom):
++            name = asname or qname
++            pattern = re.compile(r'#\\s*type:\\s.*\\b' + re.escape(name) + r'\\b')
++            return bool(pattern.search(source))
++        return False
++
+
+         for variable in assigned_to:
+             for outer_for, outer_variables in self._loop_variables:
+@@ -1684,14 +1725,16 @@ class VariablesChecker(BaseChecker):
+                         msg = f"{qname} imported as {asname}"
+                     else:
+                         msg = "import %s" % name
+-                    self.add_message("unused-import", args=msg, node=stmt)
++                    if not self._import_used_in_type_comment(stmt, qname, asname):
++                        self.add_message("unused-import", args=msg, node=stmt)
+                     return
+                 if isinstance(stmt, astroid.ImportFrom):
+                     if asname is not None:
+                         msg = f"{qname} imported from {stmt.modname} as {asname}"
+                     else:
+                         msg = f"{name} imported from {stmt.modname}"
+-                    self.add_message("unused-import", args=msg, node=stmt)
++                    if not self._import_used_in_type_comment(stmt, qname, asname):
++                        self.add_message("unused-import", args=msg, node=stmt)
+                     return
+                 message_name = "unused-variable"

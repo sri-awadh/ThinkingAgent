@@ -1,0 +1,68 @@
+diff --git a/reproduce_indexerror.py b/reproduce_indexerror.py
+new file mode 100644
+index 000000000..2c36744e8
+--- /dev/null
++++ b/reproduce_indexerror.py
+@@ -0,0 +1,24 @@
++import sys
++import sklearn
++from sklearn.linear_model import LogisticRegressionCV
++import numpy as np
++
++print("Python version:", sys.version)
++print("sklearn version:", sklearn.__version__)
++
++np.random.seed(29)
++X = np.random.normal(size=(1000, 3))
++beta = np.random.normal(size=3)
++intercept = np.random.normal(size=None)
++y = np.sign(intercept + X @ beta)
++
++print("Fitting LogisticRegressionCV with refit=False ...")
++
++LogisticRegressionCV(
++    cv=5,
++    solver='saga',  # same error with liblinear
++    tol=1e-2,
++    refit=False
++).fit(X, y)
++
++print("Done!")
+\ No newline at end of file
+diff --git a/sklearn/linear_model/logistic.py b/sklearn/linear_model/logistic.py
+index 1999f1dae..af5748d56 100644
+--- a/sklearn/linear_model/logistic.py
++++ b/sklearn/linear_model/logistic.py
+@@ -2170,18 +2170,28 @@ class LogisticRegressionCV(LogisticRegression, BaseEstimator,
+                 # Take the best scores across every fold and the average of
+                 # all coefficients corresponding to the best scores.
+                 best_indices = np.argmax(scores, axis=1)
+-                if self.multi_class == 'ovr':
++                if self.multi_class == 'ovr' and coefs_paths.ndim == 4:
++                    w = np.mean([coefs_paths[index, i, best_indices[i], :]
++                                 for i in range(len(folds))], axis=0)
++                elif self.multi_class == 'ovr' and coefs_paths.ndim == 3:
+                     w = np.mean([coefs_paths[i, best_indices[i], :]
+                                  for i in range(len(folds))], axis=0)
+                 else:
+-                    w = np.mean([coefs_paths[:, i, best_indices[i], :]
+-                                 for i in range(len(folds))], axis=0)
++                    if coefs_paths.ndim == 4:
++                        w = np.mean([coefs_paths[:, i, best_indices[i], :]
++                                     for i in range(len(folds))], axis=0)
++                    else:
++                        w = np.mean([coefs_paths[i, best_indices[i], :]
++                                     for i in range(len(folds))], axis=0)
+ 
+                 best_indices_C = best_indices % len(self.Cs_)
+                 self.C_.append(np.mean(self.Cs_[best_indices_C]))
+ 
+                 best_indices_l1 = best_indices // len(self.Cs_)
+-                self.l1_ratio_.append(np.mean(l1_ratios_[best_indices_l1]))
++                if self.penalty == 'elasticnet' and l1_ratios_ is not None:
++                    self.l1_ratio_.append(np.mean(l1_ratios_[best_indices_l1]))
++                else:
++                    self.l1_ratio_.append(None)
+ 
+             if multi_class == 'multinomial':
+                 self.C_ = np.tile(self.C_, n_classes)

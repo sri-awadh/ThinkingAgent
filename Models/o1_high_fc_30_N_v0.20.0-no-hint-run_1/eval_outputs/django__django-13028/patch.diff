@@ -1,0 +1,102 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index ce18098fd2..e872c2528d 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1124,6 +1124,9 @@ class Query(BaseExpression):
+
+     def check_filterable(self, expression):
+         """Raise an error if expression cannot be used in a WHERE clause."""
++        from django.db.models.expressions import BaseExpression
++        if not isinstance(expression, BaseExpression):
++            return
+         if not getattr(expression, 'filterable', True):
+             raise NotSupportedError(
+                 expression.__class__.__name__ + ' is disallowed in the filter '
+diff --git a/minimal_reproduce_filterable_bug.py b/minimal_reproduce_filterable_bug.py
+new file mode 100644
+index 0000000000..5b639f4073
+--- /dev/null
++++ b/minimal_reproduce_filterable_bug.py
+@@ -0,0 +1,27 @@
++import sys
++import django
++from django.db import NotSupportedError
++
++# We'll import the same "Query" class from the patched code.
++from django.db.models.sql.query import Query
++
++class MyObj:
++    """Simulate a normal Python object that has a 'filterable' attribute set to False."""
++    filterable = False
++
++
++def main():
++    q = Query(model=None)
++    try:
++        q.check_filterable(MyObj())
++        print("SUCCESS: No NotSupportedError was raised, meaning 'filterable=False' on non-Expression objs is ignored.")
++        sys.exit(0)
++    except NotSupportedError as e:
++        print("FAILURE: NotSupportedError was raised:", e)
++        sys.exit(1)
++    except Exception as e:
++        print("FAILURE: A different error was raised:", e)
++        sys.exit(2)
++
++if __name__ == "__main__":
++    main()
+diff --git a/reproduce_filterable_bug.py b/reproduce_filterable_bug.py
+new file mode 100644
+index 0000000000..ff9689fd82
+--- /dev/null
++++ b/reproduce_filterable_bug.py
+@@ -0,0 +1,49 @@
++import sys
++
++# Minimal script to reproduce the filterable bug.
++
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models.sql.query import Query
++from django.db.models.expressions import Value
++
++# Configure minimal settings for Django.
++settings.configure(
++    INSTALLED_APPS=["django.contrib.contenttypes"],
++    DATABASES={
++        "default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": ":memory:",
++        }
++    },
++    SECRET_KEY="test",
++)
++
++django.setup()
++
++
++class MyModel(models.Model):
++    filterable = models.BooleanField(default=False)
++
++# We create a Query object.
++q = Query(model=MyModel)
++
++# Create an instance with filterable=False.
++instance = MyModel(filterable=False)
++
++# We'll call check_filterable on the instance, as happens if it's used in a filter.
++# This should raise a NotSupportedError if the code incorrectly interprets 'filterable' as an Expression attribute.
++
++try:
++    q.check_filterable(instance)
++    print("No Error: The code did not raise an error. (Perhaps it's already patched?)")
++except django.db.utils.NotSupportedError as e:
++    print("Caught NotSupportedError as expected:", e)
++    sys.exit(1)
++except Exception as e:
++    print("Caught a different error:", e)
++    sys.exit(2)
++else:
++    # If we get here, no error was thrown.
++    sys.exit(0)

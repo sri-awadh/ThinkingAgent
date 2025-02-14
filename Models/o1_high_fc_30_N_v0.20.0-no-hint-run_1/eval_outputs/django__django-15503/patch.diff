@@ -1,0 +1,78 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..bdb13cff36 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -129,13 +129,11 @@ class JSONField(CheckFieldDefaultMixin, Field):
+ def compile_json_path(key_transforms, include_root=True):
+     path = ["$"] if include_root else []
+     for key_transform in key_transforms:
+-        try:
+-            num = int(key_transform)
+-        except ValueError:  # non-integer
+-            path.append(".")
+-            path.append(json.dumps(key_transform))
++        if isinstance(key_transform, int):
++            path.append("[%s]" % key_transform)
+         else:
+-            path.append("[%s]" % num)
++            path.append(".")
++            path.append(json.dumps(str(key_transform)))
+     return "".join(path)
+
+
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..59261b07f3
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,50 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++
++def setup():
++    settings.configure(
++        INSTALLED_APPS=["__main__"],
++        SECRET_KEY="secret",
++        DATABASES={
++            "default": {
++                "ENGINE": "django.db.backends.sqlite3",
++                "NAME": ":memory:",
++            }
++        },
++        TIME_ZONE="UTC",
++        USE_TZ=False,
++    )
++    django.setup()
++
++def run():
++    from django.db import models
++
++    class JsonFieldHasKeyTest(models.Model):
++        data = models.JSONField()
++        class Meta:
++            app_label = "__main__"
++
++    from django.db import connection, transaction
++
++    # Create the table for this model in memory.
++    with connection.schema_editor(atomic=False) as schema_editor:
++        schema_editor.create_model(JsonFieldHasKeyTest)
++
++    # Insert test records.
++    JsonFieldHasKeyTest.objects.create(data={"foo": "bar"})
++    JsonFieldHasKeyTest.objects.create(data={"1111": "bar"})
++
++    # Check if numeric key works.
++    c1 = JsonFieldHasKeyTest.objects.filter(data__has_key="foo").count()
++    c2 = JsonFieldHasKeyTest.objects.filter(data__has_key="1111").count()
++
++    print("c1:", c1, "expected=1")
++    print("c2:", c2, "expected=1")
++
++if __name__ == "__main__":
++    setup()
++    run()

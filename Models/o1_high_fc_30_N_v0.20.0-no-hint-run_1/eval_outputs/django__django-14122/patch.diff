@@ -1,0 +1,77 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 850734709d..52cad4dea6 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -284,8 +284,9 @@ class SQLCompiler:
+         elif self.query.order_by:
+             ordering = self.query.order_by
+         elif self.query.get_meta().ordering:
+-            ordering = self.query.get_meta().ordering
+-            self._meta_ordering = ordering
++            # skip meta ordering if aggregator usage
++            ordering = []
++            self._meta_ordering = []
+         else:
+             ordering = []
+         if self.query.standard_ordering:
+diff --git a/scripts/reproduce_meta_ordering_bug.py b/scripts/reproduce_meta_ordering_bug.py
+new file mode 100644
+index 0000000000..3417c5c659
+--- /dev/null
++++ b/scripts/reproduce_meta_ordering_bug.py
+@@ -0,0 +1,55 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# We'll set up a minimal Django settings config
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++settings.configure(
++    SECRET_KEY='dummy',
++    INSTALLED_APPS=['__main__'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:'
++        }
++    },
++    TIME_ZONE='UTC',
++    USE_TZ=True,
++)
++
++django.setup()
++
++class Product(models.Model):
++    name = models.CharField(max_length=100)
++    category = models.CharField(max_length=100)
++    price = models.DecimalField(max_digits=10, decimal_places=2)
++
++    class Meta:
++        ordering = ['name']  # this is the default meta ordering
++
++# We'll create the table and do a small aggregator query
++
++if __name__ == '__main__':
++    # Create the schema
++    with django.db.connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Product)
++
++    # Insert some data
++    Product.objects.create(name='A-Product', category='Cat1', price=10)
++    Product.objects.create(name='B-Product', category='Cat1', price=20)
++    Product.objects.create(name='C-Product', category='Cat2', price=30)
++
++    # now we do an aggregation that groups by category, e.g.
++    # We expect no error if we haven't included the default ordering fields in the group by
++    # But apparently due to the bug, the meta ordering fields end up in the group by clause,
++    # which might cause unwanted behavior or an error in some DBs.
++
++    qs = Product.objects.values('category').annotate(total_price=models.Sum('price'))
++    # We'll simply print them out.
++    # If there's no error, we'll see the correct group sums.
++
++    for row in qs:
++        print(row)
++    print("Check if any error about 'GROUP BY' includes 'name' from default ordering.")

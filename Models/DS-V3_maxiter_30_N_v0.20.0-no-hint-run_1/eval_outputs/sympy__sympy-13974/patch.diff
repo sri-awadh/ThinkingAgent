@@ -1,0 +1,147 @@
+diff --git a/sympy/physics/quantum/tensorproduct.py b/sympy/physics/quantum/tensorproduct.py
+index 9dd10d219e..b0d3fb5342 100644
+--- a/sympy/physics/quantum/tensorproduct.py
++++ b/sympy/physics/quantum/tensorproduct.py
+@@ -129,6 +129,50 @@ def __new__(cls, *args):
+             tp = Expr.__new__(cls, *new_args)
+             return c_part * tp
+
++    def _eval_power(self, exp):
++        """Handle power expressions for TensorProduct."""
++        if exp == 1:
++            return self
++        return TensorProduct(*[arg**exp for arg in self.args])
++
++    def _eval_expand_tensorproduct(self, **hints):
++        """Distribute TensorProducts across addition."""
++        args = self.args
++        add_args = []
++        stop = False
++        for i in range(len(args)):
++            if isinstance(args[i], Add):
++                for aa in args[i].args:
++                    tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])
++                    if isinstance(tp, TensorProduct):
++                        tp = tp._eval_expand_tensorproduct()
++                    add_args.append(tp)
++                break
++
++        if add_args:
++            return Add(*add_args)
++        else:
++            return self
++
++    def _eval_expand_tensorproduct(self, **hints):
++        """Distribute TensorProducts across addition."""
++        args = self.args
++        add_args = []
++        stop = False
++        for i in range(len(args)):
++            if isinstance(args[i], Add):
++                for aa in args[i].args:
++                    tp = TensorProduct(*args[:i] + (aa,) + args[i + 1:])
++                    if isinstance(tp, TensorProduct):
++                        tp = tp._eval_expand_tensorproduct()
++                    add_args.append(tp)
++                break
++
++        if add_args:
++            return Add(*add_args)
++        else:
++            return self
++
+     @classmethod
+     def flatten(cls, args):
+         # TODO: disallow nested TensorProducts.
+@@ -287,7 +331,7 @@ def tensor_product_simp_Mul(e):
+     =======
+
+     e : Expr
+-        A ``TensorProduct`` of ``Mul``s.
++        A ``TensorProduct`` of ``Muls``.
+
+     Examples
+     ========
+@@ -309,9 +353,6 @@ def tensor_product_simp_Mul(e):
+         (A*C)x(B*D)
+
+     """
+-    # TODO: This won't work with Muls that have other composites of
+-    # TensorProducts, like an Add, Pow, Commutator, etc.
+-    # TODO: This only works for the equivalent of single Qbit gates.
+     if not isinstance(e, Mul):
+         return e
+     c_part, nc_part = e.args_cnc()
+@@ -319,13 +360,29 @@ def tensor_product_simp_Mul(e):
+     if n_nc == 0 or n_nc == 1:
+         return e
+     elif e.has(TensorProduct):
++        # Handle power expressions
++        if any(isinstance(arg, Pow) and isinstance(arg.base, TensorProduct) for arg in nc_part):
++            base = None
++            exponent = None
++            for arg in nc_part:
++                if isinstance(arg, Pow) and isinstance(arg.base, TensorProduct):
++                    if base is None:
++                        base = arg.base
++                        exponent = arg.exp
++                    else:
++                        if base != arg.base:
++                            return e
++                        exponent += arg.exp
++            if base is not None:
++                return Mul(*c_part) * TensorProduct(*[arg**exponent for arg in base.args])
++
++        # Handle regular tensor products
+         current = nc_part[0]
+         if not isinstance(current, TensorProduct):
+             raise TypeError('TensorProduct expected, got: %r' % current)
+         n_terms = len(current.args)
+         new_args = list(current.args)
+         for next in nc_part[1:]:
+-            # TODO: check the hilbert spaces of next and current here.
+             if isinstance(next, TensorProduct):
+                 if n_terms != len(next.args):
+                     raise QuantumError(
+@@ -334,9 +391,18 @@ def tensor_product_simp_Mul(e):
+                     )
+                 for i in range(len(new_args)):
+                     new_args[i] = new_args[i] * next.args[i]
++            elif isinstance(next, Pow) and isinstance(next.base, TensorProduct):
++                if n_terms != len(next.base.args):
++                    raise QuantumError(
++                        'TensorProducts of different lengths: %r and %r' %
++                        (current, next.base)
++                    )
++                for i in range(len(new_args)):
++                    new_args[i] = new_args[i] * next.base.args[i]**next.exp
++            elif isinstance(next, Pow):
++                for i in range(len(new_args)):
++                    new_args[i] = new_args[i] * next
+             else:
+-                # this won't quite work as we don't want next in the
+-                # TensorProduct
+                 for i in range(len(new_args)):
+                     new_args[i] = new_args[i] * next
+             current = next
+@@ -382,12 +448,19 @@ def tensor_product_simp(e, **hints):
+     if isinstance(e, Add):
+         return Add(*[tensor_product_simp(arg) for arg in e.args])
+     elif isinstance(e, Pow):
+-        return tensor_product_simp(e.base) ** e.exp
++        if isinstance(e.base, TensorProduct):
++            return TensorProduct(*[arg**e.exp for arg in e.base.args])
++        base = tensor_product_simp(e.base)
++        if isinstance(base, TensorProduct):
++            return TensorProduct(*[arg**e.exp for arg in base.args])
++        return base ** e.exp
+     elif isinstance(e, Mul):
+         return tensor_product_simp_Mul(e)
+     elif isinstance(e, Commutator):
+         return Commutator(*[tensor_product_simp(arg) for arg in e.args])
+     elif isinstance(e, AntiCommutator):
+         return AntiCommutator(*[tensor_product_simp(arg) for arg in e.args])
++    elif isinstance(e, TensorProduct):
++        return TensorProduct(*[tensor_product_simp(arg) for arg in e.args])
+     else:
+         return e

@@ -1,0 +1,114 @@
+diff --git a/astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py b/astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py
+index a15248c38d..000cdd87be 100644
+--- a/astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py
++++ b/astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py
+@@ -110,6 +110,57 @@ def get_location_gcrs(location, obstime, ref_to_itrs, gcrs_to_ref):
+
+
+ # now the actual transforms
++import numpy as np
++from astropy import units as u
++from astropy.coordinates.matrix_utilities import rotation_matrix, matrix_transpose
++from astropy.coordinates.baseframe import frame_transform_graph
++from astropy.coordinates.transformations import FunctionTransformWithFiniteDifference
++from .altaz import AltAz
++from .hadec import HADec
++from .itrs import ITRS
++from .utils import PIOVER2
++
++def itrs_to_observed_mat(observed_frame):
++    lon, lat, height = observed_frame.location.to_geodetic('WGS84')
++    elong = lon.to_value(u.radian)
++
++    if isinstance(observed_frame, AltAz):
++        # form ITRS to AltAz matrix
++        elat = lat.to_value(u.radian)
++        # AltAz frame is left handed
++        minus_x = np.eye(3)
++        minus_x[0][0] = -1.0
++        mat = (minus_x
++               @ rotation_matrix(PIOVER2 - elat, 'y', unit=u.radian)
++               @ rotation_matrix(elong, 'z', unit=u.radian))
++
++    else:
++        # form ITRS to HADec matrix
++        # HADec frame is left handed
++        minus_y = np.eye(3)
++        minus_y[1][1] = -1.0
++        mat = (minus_y
++               @ rotation_matrix(elong, 'z', unit=u.radian))
++    return mat
++
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, ITRS, AltAz)
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, ITRS, HADec)
++def itrs_to_observed(itrs_coo, observed_frame):
++    # form the Topocentric ITRS position
++    topocentric_itrs_repr = (itrs_coo.cartesian
++                             - observed_frame.location.get_itrs().cartesian)
++    rep = topocentric_itrs_repr.transform(itrs_to_observed_mat(observed_frame))
++    return observed_frame.realize_frame(rep)
++
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, AltAz, ITRS)
++@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, HADec, ITRS)
++def observed_to_itrs(observed_coo, itrs_frame):
++    # form the Topocentric ITRS position
++    topocentric_itrs_repr = observed_coo.cartesian.transform(matrix_transpose(
++                            itrs_to_observed_mat(observed_coo)))
++    # form the Geocentric ITRS position
++    rep = topocentric_itrs_repr + observed_coo.location.get_itrs().cartesian
++    return itrs_frame.realize_frame(rep)
+
+ @frame_transform_graph.transform(FunctionTransformWithFiniteDifference, GCRS, TETE)
+ def gcrs_to_tete(gcrs_coo, tete_frame):
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..a17fd69be0
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,15 @@
++import numpy as np
++from astropy import units as u
++from astropy.coordinates import ITRS, AltAz, EarthLocation
++from astropy.time import Time
++
++# Define a location on Earth
++location = EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)
++
++# Define an ITRS coordinate
++itrs_coord = ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-01-01T00:00:00'))
++
++# Transform to AltAz
++altaz_coord = itrs_coord.transform_to(AltAz(obstime=itrs_coord.obstime, location=location))
++
++print(altaz_coord)
+\ No newline at end of file
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..499e18a363
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,23 @@
++import numpy as np
++from astropy import units as u
++from astropy.coordinates import ITRS, AltAz, EarthLocation
++from astropy.time import Time
++
++# Define a location on Earth
++# Define different ITRS coordinates and corresponding AltAz locations for edge cases
++itrs_coords = [
++    (ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=0*u.m, y=1*u.m, z=0*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=0*u.m, y=0*u.m, z=1*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=1*u.m, y=1*u.m, z=1*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-06-21T12:00:00')), EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-12-21T12:00:00')), EarthLocation(lon=0*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=90*u.deg, lat=0*u.deg, height=0*u.m)),
++    (ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=0*u.deg, lat=90*u.deg, height=0*u.m)),
++    (ITRS(x=1*u.m, y=0*u.m, z=0*u.m, obstime=Time('2023-01-01T00:00:00')), EarthLocation(lon=0*u.deg, lat=-90*u.deg, height=0*u.m)),
++]
++
++# Transform to AltAz and print the results
++for i, (itrs_coord, location) in enumerate(itrs_coords):
++    altaz_coord = itrs_coord.transform_to(AltAz(obstime=itrs_coord.obstime, location=location))
++    print(f"Test Case {i+1}: {altaz_coord}")
+\ No newline at end of file

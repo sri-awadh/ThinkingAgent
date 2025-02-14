@@ -1,0 +1,128 @@
+diff --git a/django/db/migrations/writer.py b/django/db/migrations/writer.py
+index a59f0c8dcb..2b1a72a0b9 100644
+--- a/django/db/migrations/writer.py
++++ b/django/db/migrations/writer.py
+@@ -173,9 +173,15 @@ class MigrationWriter:
+         else:
+             imports.add("from django.db import migrations")
+
+-        # Sort imports by the package / module to be imported (the part after
+-        # "from" in "from ... import ..." or after "import" in "import ...").
+-        sorted_imports = sorted(imports, key=lambda i: i.split()[1])
++        # Sort imports so that "import x" lines come before "from x import y" lines,
++        # then alphabetical order by module.
++        def import_sort_key(line):
++            tokens = line.split()
++            if tokens[0] == "import":
++                return (0, tokens[1])
++            else:
++                return (1, tokens[1])
++        sorted_imports = sorted(imports, key=import_sort_key)
+         items["imports"] = "\n".join(sorted_imports) + "\n" if imports else ""
+         if migration_imports:
+             items["imports"] += (
+diff --git a/reproduce_import_error.py b/reproduce_import_error.py
+new file mode 100644
+index 0000000000..d791ae78a4
+--- /dev/null
++++ b/reproduce_import_error.py
+@@ -0,0 +1,99 @@
++import datetime
++import time
++from django.db.migrations import Migration
++from django.db.migrations.operations.base import Operation
++from django.db.migrations.writer import MigrationWriter
++import django
++from django.conf import settings
++if not settings.configured:
++    settings.configure(USE_TZ=False, INSTALLED_APPS=[])
++django.setup()
++
++
++"""
++This script demonstrates how newly generated migration code can produce out-of-order
++imports (import vs from ...) that conflict with Django's style and isort defaults.
++
++Instructions:
++1. Before fixing, run:
++   python reproduce_import_error.py
++   Observe the generated imports in the output.
++2. Fix writer.py to reorder imports so that "import" lines come before "from" lines.
++3. Re-run this script to confirm that the ordering is now correct.
++"""
++
++class DemoOperation(Operation):
++    reduces_to_sql = False
++    reversible = True
++    serialization_expand_args = []
++    def __init__(self, today=None, current_time=None):
++        super().__init__()
++        if today is None:
++            import datetime
++            today = datetime.date.today()
++        if current_time is None:
++            import time
++            current_time = time.time()
++        self.today = today
++        self.current_time = current_time
++
++    def state_forwards(self, app_label, state):
++        pass
++
++    def database_forwards(self, app_label, schema_editor, from_state, to_state):
++        pass
++
++    def database_backwards(self, app_label, schema_editor, from_state, to_state):
++        pass
++
++    def describe(self):
++        return "Demo operation that references datetime and time modules"
++
++    def references_model(self, name, app_label=None):
++        return False
++
++    def deconstruct(self):
++        today = datetime.date.today()
++        current_time = time.time()
++        # The presence of datetime.date and time.time means migration code will import datetime/time.
++        return ("DemoOperation", [today, current_time], {})
++
++class DemoMigration(Migration):
++    dependencies = []
++    operations = [DemoOperation()]
++
++if __name__ == "__main__":
++    writer = MigrationWriter(DemoMigration("demo_migration", "demo_app"))
++    generated_code = writer.as_string()
++
++    print("=== Generated migration code ===")
++    print(generated_code)
++
++    # Extract just the import lines for analysis
++    lines = generated_code.split("\n")
++    imports_only = [l.strip() for l in lines if l.strip().startswith("import ") or l.strip().startswith("from ")]
++
++    print("\n=== Found the following import lines ===")
++    for imp_line in imports_only:
++        print(imp_line)
++
++    print("\nCheck if any 'from' import lines appear before an 'import' line, or if not sorted.")
++    # We'll compare the import lines to a version sorted the way isort/django style would expect:
++
++    def custom_key(line):
++        # put 'import' lines before 'from' lines, then sort by module
++        parts = line.split()
++        if parts[0] == 'import':
++            return (0, parts[1])
++        else:  # 'from'
++            return (1, parts[1])
++
++    sorted_lines = sorted(imports_only, key=custom_key)
++
++    if imports_only == sorted_lines:
++        print("\nImports look properly ordered.")
++    else:
++        print("\nImports are out of order.")
++        print("Expected:")
++        for l in sorted_lines:
++            print(l)

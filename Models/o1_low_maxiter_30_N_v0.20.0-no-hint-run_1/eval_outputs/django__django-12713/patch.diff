@@ -1,0 +1,151 @@
+diff --git a/db.sqlite3 b/db.sqlite3
+new file mode 100644
+index 0000000000..f59b7adb2c
+Binary files /dev/null and b/db.sqlite3 differ
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 69a5fbf389..ba5e551c5f 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -249,16 +249,17 @@ class BaseModelAdmin(metaclass=forms.MediaDefiningClass):
+             return None
+         db = kwargs.get('using')
+
+-        autocomplete_fields = self.get_autocomplete_fields(request)
+-        if db_field.name in autocomplete_fields:
+-            kwargs['widget'] = AutocompleteSelectMultiple(db_field.remote_field, self.admin_site, using=db)
+-        elif db_field.name in self.raw_id_fields:
+-            kwargs['widget'] = widgets.ManyToManyRawIdWidget(db_field.remote_field, self.admin_site, using=db)
+-        elif db_field.name in [*self.filter_vertical, *self.filter_horizontal]:
+-            kwargs['widget'] = widgets.FilteredSelectMultiple(
+-                db_field.verbose_name,
+-                db_field.name in self.filter_vertical
+-            )
++        # Only apply Django defaults if the user hasn't already provided a widget.
++        if 'widget' not in kwargs:
++            if db_field.name in self.get_autocomplete_fields(request):
++                kwargs['widget'] = AutocompleteSelectMultiple(db_field.remote_field, self.admin_site, using=db)
++            elif db_field.name in self.raw_id_fields:
++                kwargs['widget'] = widgets.ManyToManyRawIdWidget(db_field.remote_field, self.admin_site, using=db)
++            elif db_field.name in [*self.filter_vertical, *self.filter_horizontal]:
++                kwargs['widget'] = widgets.FilteredSelectMultiple(
++                    db_field.verbose_name,
++                    db_field.name in self.filter_vertical
++                )
+
+         if 'queryset' not in kwargs:
+             queryset = self.get_field_queryset(db, db_field, request)
+@@ -266,8 +267,10 @@ class BaseModelAdmin(metaclass=forms.MediaDefiningClass):
+                 kwargs['queryset'] = queryset
+
+         form_field = db_field.formfield(**kwargs)
+-        if (isinstance(form_field.widget, SelectMultiple) and
+-                not isinstance(form_field.widget, (CheckboxSelectMultiple, AutocompleteSelectMultiple))):
++        if (
++            isinstance(form_field.widget, SelectMultiple)
++            and not isinstance(form_field.widget, (CheckboxSelectMultiple, AutocompleteSelectMultiple))
++        ):
+             msg = _('Hold down “Control”, or “Command” on a Mac, to select more than one.')
+             help_text = form_field.help_text
+             form_field.help_text = format_lazy('{} {}', help_text, msg) if help_text else msg
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..eb32786c2b
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,95 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.contrib import admin
++from django.core.management import call_command
++from django import forms
++
++# Minimal settings for a quick test
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++DATABASE_FILENAME = os.path.join(BASE_DIR, "db.sqlite3")
++
++settings.configure(
++    SECRET_KEY="abc123",
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    INSTALLED_APPS=[
++        "django.contrib.admin",
++        "django.contrib.auth",
++        "django.contrib.contenttypes",
++        "django.contrib.sessions",
++        "django.contrib.messages",
++        "django.contrib.staticfiles",
++        __name__,
++    ],
++    MIDDLEWARE=[
++        "django.contrib.sessions.middleware.SessionMiddleware",
++        "django.contrib.messages.middleware.MessageMiddleware",
++        "django.contrib.auth.middleware.AuthenticationMiddleware",
++    ],
++    DATABASES={
++        "default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": DATABASE_FILENAME,
++        }
++    },
++    TEMPLATES=[
++        {
++            "BACKEND": "django.template.backends.django.DjangoTemplates",
++            "DIRS": [],
++            "APP_DIRS": True,
++            "OPTIONS": {
++                "context_processors": [
++                    "django.template.context_processors.debug",
++                    "django.template.context_processors.request",
++                    "django.contrib.auth.context_processors.auth",
++                    "django.contrib.messages.context_processors.messages",
++                ],
++            },
++        },
++    ],
++)
++import django
++
++django.setup()
++
++# Create minimal models
++class Author(models.Model):
++    name = models.CharField(max_length=50)
++
++class Book(models.Model):
++    authors = models.ManyToManyField(Author)
++
++# Register a custom Admin
++class BookAdmin(admin.ModelAdmin):
++    # Attempting to override the widget via formfield_for_manytomany
++    def formfield_for_manytomany(self, db_field, request, **kwargs):
++        if db_field.name == "authors":
++            kwargs["widget"] = forms.TextInput
++        return super().formfield_for_manytomany(db_field, request, **kwargs)
++
++admin.site.register(Author)
++admin.site.register(Book, BookAdmin)
++
++# Actually run a quick test to see if the widget override works.
++def run_repro():
++    django.setup()
++    # Migrate so we can create a Book
++    call_command("migrate", verbosity=0, interactive=False)
++    # Create an instance of BookAdmin and check if the widget was properly assigned:
++    model_admin = BookAdmin(Book, admin.site)
++
++    class DummyRequest:
++        class DummyUser:
++            def has_perm(self, perm):
++                return True
++        user = DummyUser()
++
++    request = DummyRequest()
++    form = model_admin.get_form(request)()
++    widget_class = form.fields["authors"].widget.__class__
++    print("Widget class for authors M2M is:", widget_class)
++
++if __name__ == "__main__":
++    run_repro()
+\ No newline at end of file

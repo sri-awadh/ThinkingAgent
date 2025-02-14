@@ -1,0 +1,63 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..cd8ff016
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,10 @@
++import xarray as xr
++import numpy as np
++
++my_data = xr.DataArray(np.arange(1,10), dims="x")
++
++print("Option 1 (built-in center rolling):", my_data.rolling(x=3, center=True).mean().values)
++
++my_data_rolling = my_data.rolling(x=3, center=True)
++manual_result = [window.mean().values.item() for label, window in my_data_rolling]
++print("Option 2 (manual iteration):", manual_result)
+diff --git a/xarray/core/rolling.py b/xarray/core/rolling.py
+index aef290f6..a8bad0f5 100644
+--- a/xarray/core/rolling.py
++++ b/xarray/core/rolling.py
+@@ -270,16 +270,33 @@ class DataArrayRolling(Rolling["DataArray"]):
+     def __iter__(self) -> Iterator[tuple[RollingKey, DataArray]]:
+         if self.ndim > 1:
+             raise ValueError("__iter__ is only supported for 1d-rolling")
+-        stops = np.arange(1, len(self.window_labels) + 1)
+-        starts = stops - int(self.window[0])
+-        starts[: int(self.window[0])] = 0
+-        for (label, start, stop) in zip(self.window_labels, starts, stops):
+-            window = self.obj.isel({self.dim[0]: slice(start, stop)})
+
+-            counts = window.count(dim=self.dim[0])
+-            window = window.where(counts >= self.min_periods)
+-
+-            yield (label, window)
++        # This modified logic ensures that when 'center=True', the iterator
++        # yields centered windows.
++        if self.center[0]:
++            half_window = self.window[0] // 2
++            total_len = len(self.window_labels)
++            for i in range(total_len):
++                label = self.window_labels[i]
++                start = i - half_window
++                stop = i + self.window[0] - half_window
++                start = max(start, 0)
++                stop = min(stop, total_len)
++                window = self.obj.isel({self.dim[0]: slice(start, stop)})
++
++                counts = window.count(dim=self.dim[0])
++                window = window.where(counts >= self.min_periods)
++                yield (label, window)
++        else:
++            stops = np.arange(1, len(self.window_labels) + 1)
++            starts = stops - int(self.window[0])
++            starts[: int(self.window[0])] = 0
++            for (label, start, stop) in zip(self.window_labels, starts, stops):
++                window = self.obj.isel({self.dim[0]: slice(start, stop)})
++
++                counts = window.count(dim=self.dim[0])
++                window = window.where(counts >= self.min_periods)
++                yield (label, window)
+
+     def construct(
+         self,

@@ -1,0 +1,175 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 90d90119d0..0f34099ad9 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -24,7 +24,29 @@ class SQLiteNumericMixin:
+         sql, params = self.as_sql(compiler, connection, **extra_context)
+         try:
+             if self.output_field.get_internal_type() == 'DecimalField':
+-                sql = 'CAST(%s AS NUMERIC)' % sql
++                import re
++
++                def _cast_window_func(expr_sql):
++                    pattern = r'(LAG|LEAD)\(([^)]*)\)'  # capture function call
++                    m = re.search(pattern, expr_sql, re.IGNORECASE)
++                    if not m:
++                        return expr_sql
++                    func_name = m.group(1)
++                    args_str = m.group(2)
++                    args_list = [x.strip() for x in args_str.split(',')]
++                    if args_list:
++                        # cast the first argument only if it's not already cast
++                        first_arg = args_list[0]
++                        if not first_arg.upper().startswith('CAST('):
++                            args_list[0] = f'CAST({first_arg} AS NUMERIC)'
++                    new_args = ', '.join(args_list)
++                    new_call = f'{func_name}({new_args})'
++                    return expr_sql[:m.start()] + new_call + expr_sql[m.end():]
++
++                if 'OVER(' in sql.upper():
++                    sql = f'CAST(({sql}) AS NUMERIC)'
++                else:
++                    sql = 'CAST((%s) AS NUMERIC)' % sql
+         except FieldError:
+             pass
+         return sql, params
+diff --git a/django/db/models/functions/window.py b/django/db/models/functions/window.py
+index 84b2b24ffa..30a994536c 100644
+--- a/django/db/models/functions/window.py
++++ b/django/db/models/functions/window.py
+@@ -44,6 +44,54 @@ class LagLeadFunction(Func):
+             args += (default,)
+         super().__init__(*args, **extra)
+
++
++    def as_sqlite(self, compiler, connection, **extra_context):
++        exprs = self.get_source_expressions()
++        if exprs:
++            from django.db.models import DecimalField, FloatField
++            from django.db.models.expressions import CombinedExpression, Value
++            first_expr = exprs[0]
++            # If the field is Decimal, convert to float via a multiplication expression.
++            if hasattr(first_expr, 'output_field') and isinstance(first_expr.output_field, DecimalField):
++                new_expr = CombinedExpression(
++                    first_expr,
++                    '*',
++                    Value(1.0, output_field=FloatField()),
++                    output_field=FloatField()
++                )
++                exprs[0] = new_expr
++                self.set_source_expressions(exprs)
++        return super().as_sqlite(compiler, connection, **extra_context)
++
++        # If the first argument is a DecimalField, cast it inside the function call.
++        exprs = self.get_source_expressions()
++        if exprs:
++            from django.db.models.fields import DecimalField
++            from django.db.models.functions import Cast
++            first_expr = exprs[0]
++            if hasattr(first_expr, 'output_field') and isinstance(first_expr.output_field, DecimalField):
++                casted_expr = Cast(
++                    first_expr,
++                    output_field=DecimalField(
++                        max_digits=first_expr.output_field.max_digits,
++                        decimal_places=first_expr.output_field.decimal_places,
++                    )
++                )
++                exprs[0] = casted_expr
++                self.set_source_expressions(exprs)
++        return super().as_sqlite(compiler, connection, **extra_context)
++
++                casted_expr = Cast(
++                    first_expr,
++                    output_field=DecimalField(
++                        max_digits=first_expr.output_field.max_digits,
++                        decimal_places=first_expr.output_field.decimal_places
++                    )
++                )
++                exprs[0] = casted_expr
++                self.set_source_expressions(exprs)
++        return super().as_sqlite(compiler, connection, **extra_context)
++
+     def _resolve_output_field(self):
+         sources = self.get_source_expressions()
+         return sources[0].output_field
+@@ -61,6 +109,23 @@ class LastValue(Func):
+
+ class Lead(LagLeadFunction):
+     function = 'LEAD'
++    def as_sqlite(self, compiler, connection, **extra_context):
++        exprs = self.get_source_expressions()
++        from django.db.models import DecimalField, FloatField
++        from django.db.models.expressions import CombinedExpression, Value
++        if len(exprs) > 0:
++            first_expr = exprs[0]
++            if hasattr(first_expr, 'output_field') and isinstance(first_expr.output_field, DecimalField):
++                new_expr = CombinedExpression(
++                    Value(1.0, output_field=FloatField()),
++                    '*',
++                    first_expr,
++                    output_field=FloatField()
++                )
++                exprs[0] = new_expr
++                self.set_source_expressions(exprs)
++        return super().as_sqlite(compiler, connection, **extra_context)
++
+
+
+ class NthValue(Func):
+diff --git a/scripts/reproduce_lag_bug.py b/scripts/reproduce_lag_bug.py
+new file mode 100644
+index 0000000000..e5931e2d88
+--- /dev/null
++++ b/scripts/reproduce_lag_bug.py
+@@ -0,0 +1,51 @@
++import sys
++import django
++from django.conf import settings
++
++
++def main():
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test',
++        INSTALLED_APPS=[__name__],  # We'll define the model inline
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        TIME_ZONE='UTC',
++        USE_TZ=True,
++    )
++    django.setup()
++
++    from django.db import models
++
++    class LagTest(models.Model):
++        modified = models.DateField()
++        data = models.FloatField()
++        amount = models.DecimalField(decimal_places=4, max_digits=7)
++
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(LagTest)
++
++    # Insert some test data
++    from datetime import date
++    LagTest.objects.create(modified=date(2020,1,1), data=1.23, amount=10.00)
++
++    # Attempt to run a query using LAG on a DecimalField.
++    from django.db.models import F
++    from django.db.models.functions import Lag
++    from django.db.models import Window
++    qs = LagTest.objects.all().annotate(
++        w=Window(
++            expression=Lag('amount', 7),
++            partition_by=[F('modified')],
++            order_by=F('modified').asc()
++        )
++    )
++    print(qs)
++
++if __name__ == '__main__':
++    main()

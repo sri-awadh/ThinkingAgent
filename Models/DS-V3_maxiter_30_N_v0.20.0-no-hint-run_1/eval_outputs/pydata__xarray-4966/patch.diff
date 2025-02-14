@@ -1,0 +1,99 @@
+diff --git a/xarray/coding/variables.py b/xarray/coding/variables.py
+index b035ff82..23abd2d9 100644
+--- a/xarray/coding/variables.py
++++ b/xarray/coding/variables.py
+@@ -308,6 +308,23 @@ class UnsignedIntegerCoder(VariableCoder):
+         if "_Unsigned" in attrs:
+             unsigned = pop_to(attrs, encoding, "_Unsigned")
+
++            # First ensure we're working with integer data
++            if data.dtype.kind not in ["i", "u"]:
++                if np.issubdtype(data.dtype, np.floating) and data.dtype.itemsize == 1:
++                    # Convert float to integer if it represents byte data
++                    if unsigned == "false":
++                        data = data.astype(np.int8)
++                    else:
++                        data = data.astype(np.uint8)
++                else:
++                    warnings.warn(
++                        "variable %r has _Unsigned attribute but is not "
++                        "of integer type. Ignoring attribute." % name,
++                        SerializationWarning,
++                        stacklevel=3,
++                    )
++                    return Variable(dims, data, attrs, encoding)
++
+             if data.dtype.kind == "i":
+                 if unsigned == "true":
+                     unsigned_dtype = np.dtype("u%s" % data.dtype.itemsize)
+@@ -316,12 +333,13 @@ class UnsignedIntegerCoder(VariableCoder):
+                     if "_FillValue" in attrs:
+                         new_fill = unsigned_dtype.type(attrs["_FillValue"])
+                         attrs["_FillValue"] = new_fill
+-            else:
+-                warnings.warn(
+-                    "variable %r has _Unsigned attribute but is not "
+-                    "of integer type. Ignoring attribute." % name,
+-                    SerializationWarning,
+-                    stacklevel=3,
+-                )
++            elif data.dtype.kind == "u":
++                if unsigned == "false":
++                    signed_dtype = np.dtype("i%s" % data.dtype.itemsize)
++                    transform = partial(np.asarray, dtype=signed_dtype)
++                    data = lazy_elemwise_func(data, transform, signed_dtype)
++                    if "_FillValue" in attrs:
++                        new_fill = signed_dtype.type(attrs["_FillValue"])
++                        attrs["_FillValue"] = new_fill
+
+         return Variable(dims, data, attrs, encoding)
+diff --git a/xarray/conventions.py b/xarray/conventions.py
+index bb0cc5cd..629eff19 100644
+--- a/xarray/conventions.py
++++ b/xarray/conventions.py
+@@ -347,6 +347,18 @@ def decode_cf_variable(
+         var = strings.EncodedStringCoder().decode(var)
+
+     if mask_and_scale:
++        # Handle unsigned attribute first
++        if "_Unsigned" in var.attrs:
++            unsigned = var.attrs["_Unsigned"]
++            if var.dtype.kind not in ["i", "u"] and np.issubdtype(var.dtype, np.floating):
++                if var.dtype.itemsize == 1:
++                    var = var.astype(np.uint8)
++
++            if var.dtype.kind == "i" and unsigned == "true":
++                var = var.astype(np.dtype("u%s" % var.dtype.itemsize))
++            elif var.dtype.kind == "u" and unsigned == "false":
++                var = var.astype(np.dtype("i%s" % var.dtype.itemsize))
++
+         for coder in [
+             variables.UnsignedIntegerCoder(),
+             variables.CFMaskCoder(),
+@@ -509,6 +521,26 @@ def decode_cf_variables(
+             and v.ndim > 0
+             and stackable(v.dims[-1])
+         )
++        # Handle unsigned attribute before decoding
++        if "_Unsigned" in v.attrs:
++            unsigned = v.attrs["_Unsigned"]
++            if v.dtype.kind not in ["i", "u"] and np.issubdtype(v.dtype, np.floating):
++                if v.dtype.itemsize == 1:
++                    if unsigned == "false":
++                        v = v.astype(np.int8)
++                    else:
++                        v = v.astype(np.uint8)
++
++        # Handle unsigned attribute before decoding
++        if "_Unsigned" in v.attrs:
++            unsigned = v.attrs["_Unsigned"]
++            if v.dtype.kind not in ["i", "u"] and np.issubdtype(v.dtype, np.floating):
++                if v.dtype.itemsize == 1:
++                    if unsigned == "false":
++                        v = v.astype(np.int8)
++                    else:
++                        v = v.astype(np.uint8)
++
+         new_vars[k] = decode_cf_variable(
+             k,
+             v,

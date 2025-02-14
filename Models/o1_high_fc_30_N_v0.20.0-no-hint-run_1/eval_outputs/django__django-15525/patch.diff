@@ -1,0 +1,189 @@
+diff --git a/django/core/serializers/base.py b/django/core/serializers/base.py
+index da85cb4b92..f9537e1b4c 100644
+--- a/django/core/serializers/base.py
++++ b/django/core/serializers/base.py
+@@ -331,10 +331,12 @@ def build_instance(Model, data, db):
+     """
+     default_manager = Model._meta.default_manager
+     pk = data.get(Model._meta.pk.attname)
++    dependencies = getattr(Model.natural_key, 'dependencies', [])
+     if (
+         pk is None
+-        and hasattr(default_manager, "get_by_natural_key")
+-        and hasattr(Model, "natural_key")
++        and hasattr(default_manager, 'get_by_natural_key')
++        and hasattr(Model, 'natural_key')
++        and not dependencies
+     ):
+         natural_key = Model(**data).natural_key()
+         try:
+diff --git a/manage.py b/manage.py
+new file mode 100644
+index 0000000000..d6b2a1f70e
+--- /dev/null
++++ b/manage.py
+@@ -0,0 +1,8 @@
++#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == "__main__":
++    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "testbug.settings")
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
+diff --git a/scripts/reproduce_error_old.py b/scripts/reproduce_error_old.py
+new file mode 100644
+index 0000000000..89338bb2d7
+--- /dev/null
++++ b/scripts/reproduce_error_old.py
+@@ -0,0 +1,63 @@
++import sys
++import django
++from django.conf import settings
++
++
++import sys
++sys.modules['testbug'] = sys.modules[__name__]
++
++settings.configure(
++    DATABASES={
++        'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'},
++        'other': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'},
++    },
++    INSTALLED_APPS=['testbug'],
++    SECRET_KEY='test'
++)
++
++django.setup()
++
++
++from django.core.serializers.base import build_instance
++from django.core.exceptions import ObjectDoesNotExist, ValidationError
++from django.db import models
++
++class Author(models.Model):
++    class Meta:
++        app_label = 'testbug'
++    name = models.CharField(max_length=255, unique=True)
++
++    def natural_key(self):
++        return (self.name,)
++
++class Book(models.Model):
++    class Meta:
++        app_label = 'testbug'
++    title = models.CharField(max_length=255)
++    author = models.ForeignKey(Author, models.DO_NOTHING, related_name='books')
++
++    def natural_key(self):
++        return (self.title,) + self.author.natural_key()
++        natural_key.dependencies = ['testbug.Author']
++
++    class Meta:
++        unique_together = (('title', 'author'),)
++
++# In a typical scenario, the deserializer would parse something like:
++# {"model": "testbug.book", "fields": { "title": "The Ring", "author": ["JR Tolkien"]}}
++# But let's just call build_instance directly with a data dict referencing an Author that doesn't exist.
++
++data = {
++    'title': 'The Ring',
++    # Suppose we tried to interpret the foreign key from a natural key. In real usage,
++    # "author" might be a list/tuple, but let's keep it simple.
++    'author': 'JR Tolkien'
++}
++
++print("Attempting to build a Book instance in DB='other' that references an Author by natural key (not in DB).\n")
++
++# This call should fail with an exception about the author does not exist,
++# or possibly a 'no such table' if it tries to query the DB.
++book_instance = build_instance(Book, data, 'other')
++
++print("Book built successfully:", book_instance)
+\ No newline at end of file
+diff --git a/testbug/__init__.py b/testbug/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testbug/apps.py b/testbug/apps.py
+new file mode 100644
+index 0000000000..9510230792
+--- /dev/null
++++ b/testbug/apps.py
+@@ -0,0 +1,5 @@
++from django.apps import AppConfig
++
++class TestbugConfig(AppConfig):
++    default_auto_field = 'django.db.models.AutoField'
++    name = 'testbug'
+\ No newline at end of file
+diff --git a/testbug/models.py b/testbug/models.py
+new file mode 100644
+index 0000000000..0ed2be97b2
+--- /dev/null
++++ b/testbug/models.py
+@@ -0,0 +1,34 @@
++from django.db import models
++
++class AuthorManager(models.Manager):
++    def get_by_natural_key(self, name):
++        return self.get(name=name)
++
++class Author(models.Model):
++    name = models.CharField(max_length=255, unique=True)
++    objects = AuthorManager()
++
++    def natural_key(self):
++        return (self.name,)
++
++    class Meta:
++        app_label = 'testbug'
++
++class BookManager(models.Manager):
++    def get_by_natural_key(self, title, author):
++        return self.get(title=title, author__name=author)
++
++class Book(models.Model):
++    title = models.CharField(max_length=255)
++    author = models.ForeignKey(Author, models.DO_NOTHING, related_name='books')
++    objects = BookManager()
++
++    def natural_key(self):
++        return (self.title,) + self.author.natural_key()
++
++    # Setting the dependencies ensures that Django knows Book depends on Author's natural keys.
++    natural_key.dependencies = ['testbug.Author']
++
++    class Meta:
++        app_label = 'testbug'
++        unique_together = [['title', 'author']]
+\ No newline at end of file
+diff --git a/testbug/settings.py b/testbug/settings.py
+new file mode 100644
+index 0000000000..b4b7602e6d
+--- /dev/null
++++ b/testbug/settings.py
+@@ -0,0 +1,24 @@
++import os
++
++SECRET_KEY = 'test'
++DEBUG = True
++ALLOWED_HOSTS = []
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'testbug'
++]
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:'
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:'
++    },
++}
++
++ROOT_URLCONF = 'testbug.urls'

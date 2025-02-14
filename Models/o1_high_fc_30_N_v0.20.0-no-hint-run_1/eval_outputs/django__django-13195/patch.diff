@@ -1,0 +1,71 @@
+diff --git a/django/http/response.py b/django/http/response.py
+index e00bcacefb..7ae2af039e 100644
+--- a/django/http/response.py
++++ b/django/http/response.py
+@@ -213,10 +213,14 @@ class HttpResponseBase:
+     def delete_cookie(self, key, path='/', domain=None):
+         # Most browsers ignore the Set-Cookie header if the cookie name starts
+         # with __Host- or __Secure- and the cookie doesn't use the secure flag.
+-        secure = key.startswith(('__Secure-', '__Host-'))
++        secure = settings.SESSION_COOKIE_SECURE or key.startswith(('__Secure-', '__Host-'))
++        samesite = settings.SESSION_COOKIE_SAMESITE
++        httponly = settings.SESSION_COOKIE_HTTPONLY or None
+         self.set_cookie(
+-            key, max_age=0, path=path, domain=domain, secure=secure,
++            key, max_age=0, path=path,
+             expires='Thu, 01 Jan 1970 00:00:00 GMT',
++            domain=domain if domain is not None else settings.SESSION_COOKIE_DOMAIN,
++            secure=secure, httponly=httponly, samesite=samesite,
+         )
+
+     # Common methods used by subclasses
+diff --git a/scripts/reproduce_cookie_issue2.py b/scripts/reproduce_cookie_issue2.py
+new file mode 100644
+index 0000000000..c0ecd4ef4b
+--- /dev/null
++++ b/scripts/reproduce_cookie_issue2.py
+@@ -0,0 +1,44 @@
++import sys, os
++
++# Ensure we can import Django from our local copy
++repo_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, repo_path)
++
++from django.conf import settings
++from django.http import HttpResponse
++
++if not settings.configured:
++    settings.configure(
++        SECRET_KEY='dummy',
++        DEBUG=True,
++        ALLOWED_HOSTS=['*'],
++        # The following settings, if relevant, will be used in our test.
++        SESSION_COOKIE_SAMESITE='None',
++        SESSION_COOKIE_SECURE=True,
++        SESSION_COOKIE_HTTPONLY=True,
++        SESSION_COOKIE_DOMAIN=None,
++    )
++
++# The purpose of this script is to illustrate how the samesite attribute may be lost
++# when calling delete_cookie unless we fix the method to preserve these attributes.
++
++def main():
++    response = HttpResponse("Test response")
++    response.set_cookie(
++        key='messages',
++        value='hello',
++        samesite='None',
++        secure=True,
++        httponly=True,
++    )
++    # Now let's delete the cookie.
++    response.delete_cookie('messages')
++
++    print("After setting then deleting the cookie, here's the Set-Cookie header:")
++    cookie_output = response.cookies.output(header='Set-Cookie')
++    print(cookie_output)
++
++    print("\nWe want to see that 'Secure' and 'Samesite=None' are preserved in the delete Cookie.")
++
++if __name__ == '__main__':
++    main()

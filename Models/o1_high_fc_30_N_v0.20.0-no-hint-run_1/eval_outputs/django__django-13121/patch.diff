@@ -1,0 +1,80 @@
+diff --git a/django/db/backends/base/operations.py b/django/db/backends/base/operations.py
+index 2e283a3193..ed0e2cedf7 100644
+--- a/django/db/backends/base/operations.py
++++ b/django/db/backends/base/operations.py
+@@ -580,7 +580,26 @@ class BaseDatabaseOperations:
+
+     def convert_durationfield_value(self, value, expression, connection):
+         if value is not None:
+-            return datetime.timedelta(0, 0, value)
++            try:
++                # First try to interpret value as a float.
++                return datetime.timedelta(microseconds=int(float(value)))
++            except ValueError:
++                # If that fails (e.g. '2 days, 0:00:00'), parse the standard Python timedelta str.
++                s = str(value)
++                days = 0
++                if 'days' in s:
++                    parts = s.split('days, ')
++                    days = int(parts[0].strip())
++                    time_part = parts[1].strip()
++                else:
++                    time_part = s.strip()
++                h, m, sec_str = time_part.split(':')
++                hours = int(h)
++                minutes = int(m)
++                seconds = float(sec_str)
++                total_seconds = days*86400 + hours*3600 + minutes*60 + seconds
++                micros = int(total_seconds * 1000000)
++                return datetime.timedelta(microseconds=micros)
+
+     def check_expression_support(self, expression):
+         """
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..55e858289d
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,42 @@
++import os
++import django
++import decimal
++from django.conf import settings
++from django.db import models, connection
++import datetime
++from django.db.models import F
++
++# Minimal settings.
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=["__main__"],
++    DATABASES={
++        "default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": ":memory:",
++        }
++    },
++    TIME_ZONE="UTC",
++    USE_TZ=True,
++)
++
++# Set up Django.
++django.setup()
++
++class Experiment(models.Model):
++    estimated_time = models.DurationField()
++
++# Migrate.
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Insert a row.
++Experiment.objects.create(estimated_time=datetime.timedelta(days=1))
++
++delta = datetime.timedelta(days=1)
++
++# Perform the expression.
++qs = Experiment.objects.annotate(duration=F('estimated_time') + delta)
++
++print("QuerySet result:", list(qs))

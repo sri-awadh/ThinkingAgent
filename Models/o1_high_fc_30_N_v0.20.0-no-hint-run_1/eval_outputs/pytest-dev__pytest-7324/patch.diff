@@ -1,0 +1,83 @@
+diff --git a/src/_pytest/assertion/rewrite.py b/src/_pytest/assertion/rewrite.py
+index cec0c5501..b3452a559 100644
+--- a/src/_pytest/assertion/rewrite.py
++++ b/src/_pytest/assertion/rewrite.py
+@@ -900,7 +900,7 @@ class AssertionRewriter(ast.NodeVisitor):
+                 variables = [
+                     ast.Name(name, ast.Store()) for name in self.format_variables
+                 ]
+-                clear_format = ast.Assign(variables, ast.NameConstant(None))
++                clear_format = ast.Assign(variables, ast.Constant(None))
+                 self.statements.append(clear_format)
+
+         else:  # Original assertion rewriting
+@@ -925,7 +925,7 @@ class AssertionRewriter(ast.NodeVisitor):
+         # Clear temporary variables by setting them to None.
+         if self.variables:
+             variables = [ast.Name(name, ast.Store()) for name in self.variables]
+-            clear = ast.Assign(variables, ast.NameConstant(None))
++            clear = ast.Assign(variables, ast.Constant(None))
+             self.statements.append(clear)
+         # Fix line numbers.
+         for stmt in self.statements:
+diff --git a/src/_pytest/mark/expression.py b/src/_pytest/mark/expression.py
+index 04c73411a..5c32440d3 100644
+--- a/src/_pytest/mark/expression.py
++++ b/src/_pytest/mark/expression.py
+@@ -74,6 +74,18 @@ class ParseError(Exception):
+ class Scanner:
+     __slots__ = ("tokens", "current")
+
++import ast
++
++class _FixBoolNoneTransformer(ast.NodeTransformer):
++    def visit_Name(self, node):
++        if node.id == 'True':
++            return ast.Constant(True)
++        elif node.id == 'False':
++            return ast.Constant(False)
++        elif node.id == 'None':
++            return ast.Constant(None)
++        return self.generic_visit(node)
++
+     def __init__(self, input: str) -> None:
+         self.tokens = self.lex(input)
+         self.current = next(self.tokens)
+@@ -129,7 +141,7 @@ class Scanner:
+
+ def expression(s: Scanner) -> ast.Expression:
+     if s.accept(TokenType.EOF):
+-        ret = ast.NameConstant(False)  # type: ast.expr
++        ret = ast.Constant(False)  # type: ast.expr
+     else:
+         ret = expr(s)
+         s.accept(TokenType.EOF, reject=True)
+@@ -161,7 +173,14 @@ def not_expr(s: Scanner) -> ast.expr:
+         return ret
+     ident = s.accept(TokenType.IDENT)
+     if ident:
+-        return ast.Name(ident.value, ast.Load())
++        if ident.value == "False":
++            return ast.Constant(False)
++        elif ident.value == "True":
++            return ast.Constant(True)
++        elif ident.value == "None":
++            return ast.Constant(None)
++        else:
++            return ast.Name(ident.value, ast.Load())
+     s.reject((TokenType.NOT, TokenType.LPAREN, TokenType.IDENT))
+
+
+@@ -199,11 +218,13 @@ class Expression:
+         :param input: The input expression - one line.
+         """
+         astexpr = expression(Scanner(input))
++        astexpr = _FixBoolNoneTransformer().visit(astexpr)
+         code = compile(
+             astexpr, filename="<pytest match expression>", mode="eval",
+         )  # type: types.CodeType
+         return Expression(code)
+
++
+     def evaluate(self, matcher: Callable[[str], bool]) -> bool:
+         """Evaluate the match expression.

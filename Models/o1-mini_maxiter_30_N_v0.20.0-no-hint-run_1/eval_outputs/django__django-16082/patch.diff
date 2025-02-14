@@ -1,0 +1,75 @@
+diff --git a/django/db/models/functions/math.py b/django/db/models/functions/math.py
+index 8b5fd79c3a..bab415ddf8 100644
+--- a/django/db/models/functions/math.py
++++ b/django/db/models/functions/math.py
+@@ -125,6 +125,11 @@ class Mod(FixDecimalInputMixin, NumericOutputFieldMixin, Func):
+     function = "MOD"
+     arity = 2
+
++def resolve_expression(self, compiler, connection, **kwargs):
++        self.output_field = models.DecimalField() if any(
++            isinstance(expr.output_field, models.DecimalField) for expr in self.get_source_expressions()
++        ) else models.IntegerField()
++        return super().resolve_expression(compiler, connection, **kwargs)
+
+ class Pi(NumericOutputFieldMixin, Func):
+     function = "PI"
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..0dbd98139d
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,52 @@
++import os
++import django
++from django.db import models
++from django.db.models import F
++from django.db.models.functions import Mod
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'test_app',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++django.setup()
++from django.db import connection
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++class MyModel(models.Model):
++    decimal_field = models.DecimalField(max_digits=10, decimal_places=2)
++    integer_field = models.IntegerField()
++
++    class Meta:
++        app_label = 'django__django__4.2'
++
++def reproduce_mod_issue():
++    # Create the table
++    MyModel.objects.all().delete()
++    MyModel.objects.create(decimal_field=10.5, integer_field=3)
++    MyModel.objects.create(decimal_field=20, integer_field=4)
++
++    # Perform MOD operation
++    queryset = MyModel.objects.annotate(
++        mod_result=Mod(F('decimal_field'), F('integer_field'))
++    ).values('mod_result')
++
++    for item in queryset:
++        print(item['mod_result'])
++
++if __name__ == '__main__':
++    reproduce_mod_issue()
+\ No newline at end of file

@@ -1,0 +1,123 @@
+diff --git a/myapp/__init__.py b/myapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/myapp/apps.py b/myapp/apps.py
+new file mode 100644
+index 0000000000..59fe69bc28
+--- /dev/null
++++ b/myapp/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++
++class MyAppConfig(AppConfig):
++    name = 'myapp'
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..52e17e0072
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,103 @@
++import os
++import sys
++import random
++
++# We'll do a minimal setup to demonstrate the issue of a FileField with a callable storage returning default_storage.
++# The objective is to repeatedly run migrations and see if the generated migration file flips between including or omitting "storage=myapp.models.get_storage".
++
++# Because we have the full Django repo here, let's put a minimal project config directly in this file:
++from django.conf import settings
++from django.apps import apps
++from django.core.management import call_command
++from django.core.files.storage import FileSystemStorage, default_storage
++from django.db import models
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++TEST_DB = os.path.join(BASE_DIR, "testdb.sqlite3")
++
++if not settings.configured:
++    settings.configure(
++        BASE_DIR=BASE_DIR,
++        SECRET_KEY="dummy",
++        INSTALLED_APPS=[
++            "django.contrib.contenttypes",
++            "django.contrib.auth",
++            "myapp",
++        ],
++        MIDDLEWARE=[],
++        ROOT_URLCONF=__name__,
++        DATABASES={
++            "default": {
++                "ENGINE": "django.db.backends.sqlite3",
++                "NAME": TEST_DB,
++            }
++        },
++    )
++
++import sys
++sys.path.insert(0, BASE_DIR)
++# Make sure "myapp" subdir and __init__.py exist BEFORE we call apps.populate
++app_dir = os.path.join(BASE_DIR, "myapp")
++if not os.path.exists(app_dir):
++    os.makedirs(app_dir, exist_ok=True)
++init_path = os.path.join(app_dir, "__init__.py")
++if not os.path.isfile(init_path):
++    with open(init_path, "w", encoding="utf-8"):
++        pass
++
++apps_py_path = os.path.join(app_dir, "apps.py")
++if not os.path.isfile(apps_py_path):
++    with open(apps_py_path, "w", encoding="utf-8") as f:
++        f.write("from django.apps import AppConfig\n\nclass MyAppConfig(AppConfig):\n    name = 'myapp'\n")
++
++apps.populate(settings.INSTALLED_APPS)
++
++def other_storage_factory():
++    return FileSystemStorage(location=os.path.join(BASE_DIR, "media/other"))
++
++def get_storage():
++    return random.choice([default_storage, other_storage_factory()])
++
++# We'll dynamically create an app named "myapp" here for demonstration:
++from django.apps import AppConfig
++class MyAppConfig(AppConfig):
++    name = "myapp"
++    verbose_name = "My App"
++
++class MyModel(models.Model):
++    my_file = models.FileField(storage=get_storage, blank=True, null=True)
++
++# Minimal migration code
++def run_repro():
++    try:
++        # Clean up existing migration files from any prior runs
++        migrations_dir = os.path.join(BASE_DIR, "myapp", "migrations")
++        if os.path.exists(migrations_dir):
++            for f in os.listdir(migrations_dir):
++                if f != "__init__.py" and f.endswith(".py"):
++                    os.remove(os.path.join(migrations_dir, f))
++
++        call_command("makemigrations", "myapp")
++        print("First makemigrations completed.")
++        # Now run it again to see if it flips
++        call_command("makemigrations", "myapp")
++        print("Second makemigrations completed.")
++        # This is where the issue might appear: the second run might produce a new migration that either includes or omits "storage=".
++
++    finally:
++        # Cleanup the test DB
++        if os.path.exists(TEST_DB):
++            os.remove(TEST_DB)
++
++if __name__ == "__main__":
++    # Make sure "myapp" subdir and __init__.py exist
++    app_dir = os.path.join(BASE_DIR, "myapp")
++    if not os.path.exists(app_dir):
++        os.makedirs(app_dir, exist_ok=True)
++    init_path = os.path.join(app_dir, "__init__.py")
++    if not os.path.isfile(init_path):
++        with open(init_path, "w", encoding="utf-8"):
++            pass
++
++    # Kick off the reproduction process
++    run_repro()
+\ No newline at end of file

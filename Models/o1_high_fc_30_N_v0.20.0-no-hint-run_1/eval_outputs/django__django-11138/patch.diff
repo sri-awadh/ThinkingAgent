@@ -1,0 +1,98 @@
+diff --git a/django/db/backends/mysql/operations.py b/django/db/backends/mysql/operations.py
+index 50f85e0621..46064b3794 100644
+--- a/django/db/backends/mysql/operations.py
++++ b/django/db/backends/mysql/operations.py
+@@ -70,7 +70,9 @@ class DatabaseOperations(BaseDatabaseOperations):
+
+     def _convert_field_to_tz(self, field_name, tzname):
+         if settings.USE_TZ:
+-            field_name = "CONVERT_TZ(%s, 'UTC', '%s')" % (field_name, tzname)
++            db_tz = self.connection.settings_dict.get('TIME_ZONE', 'UTC')
++            if db_tz != tzname:
++                field_name = "CONVERT_TZ(%s, '%s', '%s')" % (field_name, db_tz, tzname)
+         return field_name
+
+     def datetime_cast_date_sql(self, field_name, tzname):
+diff --git a/scripts/reproduce_issue.py b/scripts/reproduce_issue.py
+new file mode 100644
+index 0000000000..367802fd2d
+--- /dev/null
++++ b/scripts/reproduce_issue.py
+@@ -0,0 +1,77 @@
++import os
++import django
++import datetime
++from django.conf import settings
++from django.db import models
++from django.utils import timezone
++
++# Configure Django programmatically.
++# We'll set up a minimal project using a MySQL database. Adjust DB credentials to ensure the script runs.
++# This script is for demonstration only and won't actually run unless MySQL is accessible.
++
++DATABASE_NAME = os.getenv('MYSQL_DATABASE', 'test_db')
++DATABASE_USER = os.getenv('MYSQL_USER', 'root')
++DATABASE_PASSWORD = os.getenv('MYSQL_PASSWORD', '')
++DATABASE_HOST = os.getenv('MYSQL_HOST', '127.0.0.1')
++DATABASE_PORT = os.getenv('MYSQL_PORT', '3306')
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='secret-key',
++    USE_TZ=True,
++    TIME_ZONE='Europe/Paris',  # tz1
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.mysql',
++            'NAME': DATABASE_NAME,
++            'USER': DATABASE_USER,
++            'PASSWORD': DATABASE_PASSWORD,
++            'HOST': DATABASE_HOST,
++            'PORT': DATABASE_PORT,
++        },
++        'legacy': {
++            'ENGINE': 'django.db.backends.mysql',
++            'NAME': DATABASE_NAME,
++            'USER': DATABASE_USER,
++            'PASSWORD': DATABASE_PASSWORD,
++            'HOST': DATABASE_HOST,
++            'PORT': DATABASE_PORT,
++            'TIME_ZONE': 'Europe/Paris',  # tz2
++        },
++    },
++    INSTALLED_APPS=[
++        __name__  # We declare the current module as an app so we can define models
++    ],
++)
++
++# Setup Django
++django.setup()
++
++class MyModel(models.Model):
++    my_datetime_field = models.DateTimeField()
++    class Meta:
++        app_label = __name__
++
++# Recreate tables
++from django.core.management import call_command
++
++try:
++    call_command('migrate', '--run-syncdb', verbosity=0)
++except Exception as e:
++    print("Migration failed:", e)
++
++# Insert a row in the DB with a naive datetime that will be made aware.
++naive_dt = datetime.datetime(2017, 7, 6, 20, 50)
++aware_dt = timezone.make_aware(naive_dt, timezone.get_current_timezone())
++MyModel.objects.all().delete()
++MyModel.objects.create(my_datetime_field=aware_dt)
++
++# 1) Filter with exact dt => expected True
++exists_exact = MyModel.objects.filter(my_datetime_field=aware_dt).exists()
++print("Exact datetime match =>", exists_exact)
++
++# 2) Filter with __date => expected True as well
++exists_date = MyModel.objects.filter(my_datetime_field__date=aware_dt.date()).exists()
++print("Date lookup =>", exists_date)
++
++print("If 'UTC' is forcibly used in CONVERT_TZ from DB side, the second check might incorrectly be False.")

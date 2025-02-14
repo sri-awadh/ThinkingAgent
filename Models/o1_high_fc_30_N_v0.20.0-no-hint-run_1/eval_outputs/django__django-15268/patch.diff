@@ -1,0 +1,156 @@
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index c120f5d32d..c3007427fe 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -521,6 +521,19 @@ class AlterTogetherOptionOperation(ModelOptionOperation):
+             )
+         )
+
++    def reduce(self, operation, app_label):
++        r = super().reduce(operation, app_label)
++        if r is not None:
++            return r
++        # If the next operation is the same class (i.e. either AlterUniqueTogether
++        # or AlterIndexTogether) for the same model, and this one sets the option
++        # to empty while the next sets it to non-empty, skip the current.
++        if (self.__class__ == operation.__class__ and
++            self.name_lower == operation.name_lower and
++            not self.option_value and operation.option_value):
++            return [operation]
++        return None
++
+     def describe(self):
+         return "Alter %s for %s (%s constraint(s))" % (self.option_name, self.name, len(self.option_value or ''))
+
+diff --git a/django/db/migrations/optimizer.py b/django/db/migrations/optimizer.py
+index ee20f62af2..b3f41c1499 100644
+--- a/django/db/migrations/optimizer.py
++++ b/django/db/migrations/optimizer.py
+@@ -34,9 +34,11 @@ class MigrationOptimizer:
+             result = self.optimize_inner(operations, app_label)
+             self._iterations += 1
+             if result == operations:
++                result = self._merge_alter_together(result)
+                 return result
+             operations = result
+
++
+     def optimize_inner(self, operations, app_label):
+         """Inner optimization loop."""
+         new_operations = []
+@@ -66,4 +68,63 @@ class MigrationOptimizer:
+                     right = False
+             else:
+                 new_operations.append(operation)
++    def _merge_alter_together(self, operations):
++        return new_operations
++        """
++        return new_operations
++        Detect and remove consecutive "remove all constraints" followed by
++        "add constraints" for the same model in separate AlterUniqueTogether
++        and AlterIndexTogether operations. Example:
++
++            [
++                AlterUniqueTogether(name='mymodel', unique_together=set()),
++                AlterIndexTogether(name='mymodel', index_together=set()),
++                AlterUniqueTogether(name='mymodel', unique_together={('col',)}),
++                AlterIndexTogether(name='mymodel', index_together={('col',)})
++            ]
++
++        should be turned into:
++
++            [
++                AlterUniqueTogether(name='mymodel', unique_together={('col',)}),
++                AlterIndexTogether(name='mymodel', index_together={('col',)})
++            ]
++        """
++        from django.db.migrations.operations.models import AlterUniqueTogether, AlterIndexTogether
++        new_ops = []
++        skip_count = 0
++        i = 0
++        while i < len(operations):
++            if i + 3 < len(operations):
++                op1 = operations[i]
++                op2 = operations[i + 1]
++                op3 = operations[i + 2]
++                op4 = operations[i + 3]
++                # Check for pattern:
++                #   op1 = AlterUniqueTogether(..., set()),
++                #   op2 = AlterIndexTogether(..., set()),
++                #   op3 = AlterUniqueTogether(..., non-empty),
++                #   op4 = AlterIndexTogether(..., non-empty)
++                # same model name
++                if (
++                    isinstance(op1, AlterUniqueTogether)
++                    and isinstance(op2, AlterIndexTogether)
++                    and isinstance(op3, AlterUniqueTogether)
++                    and isinstance(op4, AlterIndexTogether)
++                    and op1.name_lower == op2.name_lower == op3.name_lower == op4.name_lower
++                    and not op1.option_value
++                    and not op2.option_value
++                    and op3.option_value
++                    and op4.option_value
++                ):
++                    # Skip the first two, replace them with just op3, op4
++                    new_ops.append(op3)
++                    new_ops.append(op4)
++                    i += 4
++                    continue
++            # Otherwise, keep the current op
++            new_ops.append(operations[i])
++            i += 1
++        return new_ops
++
+         return new_operations
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..c4ae4b69fc
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,46 @@
++import sys
++
++def main():
++    # We will attempt to replicate the scenario described in the PR.
++    # For demonstration, we will create some consecutive operations that remove constraints and then re-add them.
++    # Then we will run the optimizer to see if they get combined.
++
++    import django
++    from django.conf import settings
++    from django.db import DEFAULT_DB_ALIAS, connections
++    from django.db.migrations.optimizer import MigrationOptimizer
++    from django.db.migrations.operations.models import AlterUniqueTogether, AlterIndexTogether
++
++    # Configure Django (for minimal usage)
++    settings.configure(
++        INSTALLED_APPS=["django.contrib.contenttypes"], # minimal
++        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
++        SECRET_KEY="testkey",
++    )
++    django.setup()
++
++    # Our list of consecutive operations
++    ops = [
++        AlterUniqueTogether(name='mymodel', unique_together=set()),
++        AlterIndexTogether(name='mymodel', index_together=set()),
++        AlterUniqueTogether(name='mymodel', unique_together={('col',)}),
++        AlterIndexTogether(name='mymodel', index_together={('col',)}),
++    ]
++
++    # Optimize
++    optimized_ops = MigrationOptimizer().optimize(ops, app_label="dummy_app")
++
++    print("Original operations:")
++    for op in ops:
++        print(" ", op)
++
++    print("\nOptimized operations:")
++    for op in optimized_ops:
++        print(" ", op)
++
++    # We can see how many remain.
++    print(f"\nNumber of original ops: {len(ops)}")
++    print(f"Number of optimized ops: {len(optimized_ops)}")
++
++if __name__ == "__main__":
++    main()

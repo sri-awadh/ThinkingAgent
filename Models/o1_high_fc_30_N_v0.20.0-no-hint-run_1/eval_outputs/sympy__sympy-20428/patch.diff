@@ -1,0 +1,111 @@
+diff --git a/repro/reproduce_bug.py b/repro/reproduce_bug.py
+new file mode 100644
+index 0000000000..13fa4c1cbf
+--- /dev/null
++++ b/repro/reproduce_bug.py
+@@ -0,0 +1,23 @@
++from sympy import symbols, sympify, Poly, sqrt
++
++x = symbols('x')
++
++expr_str = ('-117968192370600*18**(1/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + '            '2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) '            '- 15720318185*2**(2/3)*3**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + '            '2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) '            '+ 15720318185*12**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + '            '2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) '            '+ 117968192370600*2**(1/3)*3**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + '            '2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3))')
++
++f = Poly(sympify(expr_str), x)
++coeff, bad_poly = f.clear_denoms()
++
++print('coeff:', coeff)
++print('bad_poly:', bad_poly)
++print('bad_poly.is_zero:', bad_poly.is_zero)
++
++# This sometimes triggers IndexError in .terms_gcd() if the polynomial is incorrectly formed.
++print('bad_poly.as_expr() =>', bad_poly.as_expr())
++print('bad_poly.as_expr().is_zero =>', bad_poly.as_expr().is_zero)
++
++try:
++    tc = bad_poly.terms_gcd()
++    print('terms_gcd:', tc)
++except Exception as e:
++    print('Exception in terms_gcd():', e)
++
+diff --git a/sympy/polys/densebasic.py b/sympy/polys/densebasic.py
+index 1caeb8f629..9b0d610f93 100644
+--- a/sympy/polys/densebasic.py
++++ b/sympy/polys/densebasic.py
+@@ -1673,6 +1673,45 @@ def dmp_terms_gcd(f, u, K):
+     >>> dmp_terms_gcd(f, 1, ZZ)
+     ((2, 1), [[1], [1, 0]])
+
++    """
++    # First strip trailing zeros:
++    f = dmp_strip(f, u)
++    # If now ground or zero polynomial, return (0,..., 0), f
++    if dmp_ground_TC(f, u, K) or dmp_zero_p(f, u):
++        return (0,)*(u + 1), f
++
++    F = dmp_to_dict(f, u)
++    G = monomial_min(*list(F.keys()))
++
++    if all(g == 0 for g in G):
++        return G, f
++
++    newf = {}
++    for monom, coeff in F.items():
++        newf[monomial_div(monom, G)] = coeff
++
++    return G, dmp_from_dict(newf, u, K)
++
++    # Strip trailing zeros first:
++    f = dmp_strip(f, u)
++    F = dmp_to_dict(f, u)
++    if not F:
++        # This is effectively the zero polynomial
++        return (0,)*(u + 1), f
++    """
++    Remove GCD of terms from ``f`` in ``K[X]``.
++
++    Examples
++    ========
++
++    >>> from sympy.polys.domains import ZZ
++    >>> from sympy.polys.densebasic import dmp_terms_gcd
++
++    >>> f = ZZ.map([[1, 0], [1, 0, 0], [], []])
++
++    >>> dmp_terms_gcd(f, 1, ZZ)
++    ((2, 1), [[1], [1, 0]])
++
+     """
+     if dmp_ground_TC(f, u, K) or dmp_zero_p(f, u):
+         return (0,)*(u + 1), f
+diff --git a/sympy/polys/densetools.py b/sympy/polys/densetools.py
+index f057824642..9e2f28dce8 100644
+--- a/sympy/polys/densetools.py
++++ b/sympy/polys/densetools.py
+@@ -197,6 +197,7 @@ def dmp_diff(f, m, u, K):
+
+     """
+     if not u:
++    f = dup_strip(f)
+         return dup_diff(f, m, K)
+     if m <= 0:
+         return f
+@@ -1197,6 +1198,7 @@ def dup_clear_denoms(f, K0, K1=None, convert=False):
+
+     if not K1.is_one(common):
+         f = dup_mul_ground(f, common, K0)
++        f = dup_strip(f)
+
+     if not convert:
+         return common, f
+diff --git a/sympy/polys/polyclasses.py b/sympy/polys/polyclasses.py
+index 238a0f0b25..7dcfceeb66 100644
+--- a/sympy/polys/polyclasses.py
++++ b/sympy/polys/polyclasses.py
+@@ -155,6 +155,7 @@ def __init__(self, rep, dom, lev=None, ring=None):
+         else:
+             rep, lev = dmp_validate(rep)
+
++            rep = dmp_strip(rep, lev)
+         self.rep = rep
+         self.lev = lev
+         self.dom = dom

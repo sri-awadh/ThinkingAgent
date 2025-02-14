@@ -1,0 +1,70 @@
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index 3daf84c108..6d96c959f5 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -171,17 +171,31 @@ def _collect_factor_and_dimension(self, expr):
+                 exp_dim = 1
+             return factor ** exp_factor, dim ** (exp_factor * exp_dim)
+         elif isinstance(expr, Add):
+-            factor, dim = self._collect_factor_and_dimension(expr.args[0])
+-            for addend in expr.args[1:]:
+-                addend_factor, addend_dim = \
+-                    self._collect_factor_and_dimension(addend)
+-                if dim != addend_dim:
++            # Handle addition with special case for dimensionless terms
++            factors = []
++            dims = []
++            for term in expr.args:
++                factor, dim = self._collect_factor_and_dimension(term)
++                factors.append(factor)
++                dims.append(dim)
++
++            # If any term is dimensionless, result is dimensionless
++            if any(self.get_dimension_system().is_dimensionless(d) for d in dims):
++                # Convert all terms to dimensionless if necessary
++                for i in range(len(factors)):
++                    if not self.get_dimension_system().is_dimensionless(dims[i]):
++                        factors[i] = factors[i] / dims[i].scale_factor
++                        dims[i] = Dimension(1)
++                return sum(factors), Dimension(1)
++
++            # Otherwise, check that all dimensions are equal
++            first_dim = dims[0]
++            for dim in dims[1:]:
++                if dim != first_dim:
+                     raise ValueError(
+-                        'Dimension of "{}" is {}, '
+-                        'but it should be {}'.format(
+-                            addend, addend_dim, dim))
+-                factor += addend_factor
+-            return factor, dim
++                        'Dimension mismatch in addition: "{}" has dimension {}, '
++                        'but expected {}'.format(expr, dim, first_dim))
++            return sum(factors), first_dim
+         elif isinstance(expr, Derivative):
+             factor, dim = self._collect_factor_and_dimension(expr.args[0])
+             for independent, count in expr.variable_count:
+@@ -190,10 +204,19 @@ def _collect_factor_and_dimension(self, expr):
+                 dim /= idim**count
+             return factor, dim
+         elif isinstance(expr, Function):
+-            fds = [self._collect_factor_and_dimension(
+-                arg) for arg in expr.args]
+-            return (expr.func(*(f[0] for f in fds)),
+-                    *(d[1] for d in fds))
++            if isinstance(expr, exp):
++                # Exponential functions are always dimensionless
++                arg_factor, arg_dim = self._collect_factor_and_dimension(expr.args[0])
++                if not self.get_dimension_system().is_dimensionless(arg_dim):
++                    # Convert argument to dimensionless by dividing by its own dimension
++                    arg_factor = arg_factor / arg_dim.scale_factor
++                    arg_dim = Dimension(1)
++                return expr.func(arg_factor), Dimension(1)
++            else:
++                fds = [self._collect_factor_and_dimension(
++                    arg) for arg in expr.args]
++                return (expr.func(*(f[0] for f in fds)),
++                        *(d[1] for d in fds))
+         elif isinstance(expr, Dimension):
+             return S.One, expr
+         else:

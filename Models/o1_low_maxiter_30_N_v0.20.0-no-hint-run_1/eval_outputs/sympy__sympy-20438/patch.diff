@@ -1,0 +1,89 @@
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..57b47dcf7d
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,17 @@
++from sympy import FiniteSet, ProductSet, Eq
++
++# Minimal script to reproduce the problem described in the PR
++
++a = FiniteSet(1, 2)
++b = ProductSet(a, a)
++c = FiniteSet((1, 1), (1, 2), (2, 1), (2, 2))
++
++print("b =", b)
++print("c =", c)
++print("b.is_subset(c) =", b.is_subset(c))
++print("c.is_subset(b) =", c.is_subset(b))
++
++try:
++    print("Eq(b, c).simplify() =", Eq(b, c).simplify())
++except Exception as e:
++    print("Error while simplifying Eq(b, c):", repr(e))
+\ No newline at end of file
+diff --git a/sympy/sets/handlers/issubset.py b/sympy/sets/handlers/issubset.py
+index fdca06025a..be5db43933 100644
+--- a/sympy/sets/handlers/issubset.py
++++ b/sympy/sets/handlers/issubset.py
+@@ -6,11 +6,23 @@
+ from sympy.multipledispatch import dispatch
+
+
++from sympy.sets.sets import ProductSet, FiniteSet
+ _inf_sets = [S.Naturals, S.Naturals0, S.Integers, S.Rationals, S.Reals, S.Complexes]
+
+ @dispatch(Set, Set)  # type: ignore # noqa:F811
+ def is_subset_sets(a, b): # noqa:F811
+     return None
++@dispatch(ProductSet, FiniteSet)
++def is_subset_sets(a_ps, b_fs):
++    # If all factors of a_ps are finite sets, we can build the full cartesian product
++    # and compare it directly. Otherwise, we cannot decide, return None.
++    if all(s.is_FiniteSet for s in a_ps.sets):
++        from sympy import FiniteSet
++        from itertools import product
++        sets_of_elems = [list(s) for s in a_ps.sets]
++        product_elems = FiniteSet(*product(*sets_of_elems))
++        return product_elems.is_subset(b_fs)
++    return None
+
+ @dispatch(Interval, Interval)  # type: ignore # noqa:F811
+ def is_subset_sets(a, b): # noqa:F811
+diff --git a/sympy/sets/sets.py b/sympy/sets/sets.py
+index 3c4aa86e36..eeca5a038a 100644
+--- a/sympy/sets/sets.py
++++ b/sympy/sets/sets.py
+@@ -523,6 +523,10 @@ def measure(self):
+
+         >>> from sympy import Interval, Union
+         >>> Interval(0, 1).measure
++def equals(self, other):
++    if self == other:
++        return True
++    return None
+         1
+         >>> Union(Interval(0, 1), Interval(2, 3)).measure
+         2
+@@ -1528,6 +1532,11 @@ def as_relational(self, symbol):
+
+ class Complement(Set, EvalfMixin):
+     r"""Represents the set difference or relative complement of a set with
++def equals(self, other):
++    if self == other:
++        return True
++    # Fall back to None if we can't be certain
++    return None
+     another set.
+
+     `A - B = \{x \in A \mid x \notin B\}`
+@@ -1617,6 +1626,10 @@ def __iter__(self):
+
+ class EmptySet(Set, metaclass=Singleton):
+     """
++def equals(self, other):
++    if self == other:
++        return True
++    return None
+     Represents the empty set. The empty set is available as a singleton
+     as S.EmptySet.

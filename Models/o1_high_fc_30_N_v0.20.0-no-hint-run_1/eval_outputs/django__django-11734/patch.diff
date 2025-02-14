@@ -1,0 +1,91 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 35f3c5e1ea..6024e45aff 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1706,6 +1706,7 @@ class Query(BaseExpression):
+             filter_expr = (filter_lhs, OuterRef(filter_rhs.name))
+         # Generate the inner query.
+         query = Query(self.model)
++        query.subquery = True
+         query._filtered_relations = self._filtered_relations
+         query.add_filter(filter_expr)
+         query.clear_ordering(True)
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..e8e6d5d5c3
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,73 @@
++import sys
++import os
++sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++
++from django.conf import settings
++
++settings.configure(
++    INSTALLED_APPS=["__main__"],
++    DATABASES={
++        "default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": ":memory:"
++        }
++    },
++    SECRET_KEY="dummy"
++)
++
++import django
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q
++
++class Tag(models.Model):
++    __module__ = "__main__"
++    category_id = models.IntegerField()
++
++class Item(models.Model):
++    __module__ = "__main__"
++    tags = models.ForeignKey(Tag, on_delete=models.CASCADE, null=True)
++
++class Number(models.Model):
++    __module__ = "__main__"
++    some_field = models.CharField(max_length=50, null=True)
++
++def main():
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Tag)
++        schema_editor.create_model(Item)
++        schema_editor.create_model(Number)
++
++    Tag.objects.create(category_id=1)
++    Tag.objects.create(category_id=2)
++    t3 = Tag.objects.create(category_id=3)
++    i1 = Item.objects.create(tags=t3)
++    n1 = Number.objects.create(some_field="test")
++
++    print("filter 1")
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.filter(tags__category_id=OuterRef("pk"))
++        )
++    ).filter(foo=True)
++    print(list(qs))
++
++    print("exclude 2")
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.exclude(tags__category_id=OuterRef("pk"))
++        )
++    ).filter(foo=True)
++    print(list(qs))
++
++    print("filter 3 ~Q")
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.filter(~Q(tags__category_id=OuterRef("pk")))
++        )
++    ).filter(foo=True)
++    print(list(qs))
++
++if __name__ == "__main__":
++    main()

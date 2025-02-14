@@ -1,0 +1,112 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 2428218696..914d15b725 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -740,6 +740,30 @@ class Model(metaclass=ModelBase):
+         """
+         using = using or router.db_for_write(self.__class__, instance=self)
+         assert not (force_insert and (force_update or update_fields))
++        if not raw:
++            # Ensure local fk fields referencing unsaved parent objects are synced
++            # after the parent pk is assigned (e.g. non-auto primary keys)
++            for f in self._meta.concrete_fields:
++                if f.is_relation and f.many_to_one and not f.remote_field.parent_link:
++                    parent = getattr(self, f.name, None)
++                    if parent is not None:
++                        if parent.pk is None:
++                            parent.save(using=using)
++                        setattr(self, f.attname, parent.pk)
++
++        # Ensure foreign key fields are in sync with related object PKs
++        # even if that PK was assigned after the initial assignment.
++        for f in self._meta.concrete_fields:
++            if f.is_relation and f.many_to_one and not f.remote_field.parent_link:
++                obj = getattr(self, f.name, None)
++                if obj is not None:
++                    if obj.pk is None:
++                        obj.save(using=using)
++                    current_fk_val = getattr(self, f.attname)
++                    if current_fk_val != obj.pk:
++                        setattr(self, f.attname, obj.pk)
++
++
+         assert update_fields is None or update_fields
+         cls = origin = self.__class__
+         # Skip proxies, but keep the origin as the proxy model.
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index 872a4c98dc..ec85a9a2db 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -228,6 +228,9 @@ class ForwardManyToOneDescriptor:
+             if not router.allow_relation(value, instance):
+                 raise ValueError('Cannot assign "%r": the current database router prevents this relation.' % value)
+
++        if value is not None and value.pk is None:
++            value.save()
++
+         remote_field = self.field.remote_field
+         # If we're setting the value of a OneToOneField to None, we need to clear
+         # out the cache on any old related object. Otherwise, deleting the
+diff --git a/scripts/reproduce_error.py b/scripts/reproduce_error.py
+new file mode 100644
+index 0000000000..57fec8714e
+--- /dev/null
++++ b/scripts/reproduce_error.py
+@@ -0,0 +1,57 @@
++import sys
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        SECRET_KEY='test',
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        MIDDLEWARE_CLASSES=[],
++        MIDDLEWARE=[],
++    )
++
++django.setup()
++
++from django.db import models, connection, transaction
++
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++
++    class Meta:
++        app_label = 'test_app'
++
++with connection.schema_editor() as editor:
++    editor.create_model(Product)
++    editor.create_model(Order)
++
++try:
++    with transaction.atomic():
++        order = Order()
++        order.product = Product()
++        order.product.sku = "foo"
++        order.product.save()
++        order.save()
++        if Order.objects.filter(product_id="").exists():
++            print("Test failed: Found an Order with an empty product_id!")
++        else:
++            print("All good: No Order with empty product_id.")
++except Exception as e:
++    print(f"Error: {e}")
++    sys.exit(1)
++
++print("The script completed.")

@@ -1,0 +1,91 @@
+diff --git a/astropy/io/ascii/connect.py b/astropy/io/ascii/connect.py
+index 1501e45035..d1e6cb9f86 100644
+--- a/astropy/io/ascii/connect.py
++++ b/astropy/io/ascii/connect.py
+@@ -25,7 +25,11 @@ def io_write(format, table, filename, **kwargs):
+     if format != "ascii":
+         format = re.sub(r"^ascii\.", "", format)
+         kwargs["format"] = format
+-    return write(table, filename, **kwargs)
++    header_rows = kwargs.pop("header_rows", None)
++result = write(table, filename, **kwargs)
++if header_rows is not None and hasattr(table, "write") and hasattr(table.write, "header_rows"):
++    table.write.header_rows = header_rows
++return result
+
+
+ def io_identify(suffix, origin, filepath, fileobj, *args, **kwargs):
+diff --git a/astropy/io/ascii/core.py b/astropy/io/ascii/core.py
+index 381b5b13db..98f7c0ac51 100644
+--- a/astropy/io/ascii/core.py
++++ b/astropy/io/ascii/core.py
+@@ -1812,7 +1812,14 @@ def _get_writer(Writer, fast_writer, **kwargs):
+         return FAST_CLASSES[f"fast_{Writer._format_name}"](**kwargs)
+
+     writer_kwargs = {k: v for k, v in kwargs.items() if k not in extra_writer_pars}
+-    writer = Writer(**writer_kwargs)
++    # Temporarily strip out "header_rows" if present to avoid errors in Writer constructor
++header_rows = writer_kwargs.pop("header_rows", None)
++writer = Writer(**writer_kwargs)
++if header_rows is not None:
++    # If the writer supports a "header_rows" concept, store it somewhere
++    # This way, it can still be used by the writer if it wants.
++    if hasattr(writer, "header_rows"):
++        writer.header_rows = header_rows
+
+     if "delimiter" in kwargs:
+         writer.header.splitter.delimiter = kwargs["delimiter"]
+diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+index abdeba8efb..ca4cb6107a 100644
+--- a/astropy/io/ascii/rst.py
++++ b/astropy/io/ascii/rst.py
+@@ -32,6 +32,8 @@ class SimpleRSTData(FixedWidthData):
+     splitter_class = FixedWidthTwoLineDataSplitter
+
+
++from .fixedwidth import FixedWidth
++
+ class RST(FixedWidth):
+     """reStructuredText simple format table.
+
+@@ -57,8 +59,20 @@ class RST(FixedWidth):
+     data_class = SimpleRSTData
+     header_class = SimpleRSTHeader
+
+-    def __init__(self):
+-        super().__init__(delimiter_pad=None, bookend=False)
++
++def __init__(self, **kwargs):
++    # Safely gather 'header_rows' if provided from user
++    header_rows = kwargs.pop('header_rows', None)
++    # Provide default arguments that RST expects
++    if 'delimiter_pad' not in kwargs:
++        kwargs['delimiter_pad'] = None
++    if 'bookend' not in kwargs:
++        kwargs['bookend'] = False
++    # Call parent constructor
++    super().__init__(**kwargs)
++    # If user specified 'header_rows', store it in the base class
++    if header_rows is not None:
++        self.header_rows = header_rows
+
+     def write(self, lines):
+         lines = super().write(lines)
+diff --git a/astropy/io/ascii/ui.py b/astropy/io/ascii/ui.py
+index 993dacf512..5af04188fa 100644
+--- a/astropy/io/ascii/ui.py
++++ b/astropy/io/ascii/ui.py
+@@ -972,7 +972,12 @@ def write(
+         fast_writer = False
+
+     Writer = _get_format_class(format, Writer, "Writer")
+-    writer = get_writer(Writer=Writer, fast_writer=fast_writer, **kwargs)
++    # Remove "header_rows" to avoid errors in Writer constructor
++hr = kwargs.pop("header_rows", None)
++writer = get_writer(Writer=Writer, fast_writer=fast_writer, **kwargs)
++# If we popped header_rows, store it on the writer if possible
++if hr is not None and hasattr(writer, "header_rows"):
++    writer.header_rows = hr
+     if writer._format_name in core.FAST_CLASSES:
+         writer.write(table, output)
+         return

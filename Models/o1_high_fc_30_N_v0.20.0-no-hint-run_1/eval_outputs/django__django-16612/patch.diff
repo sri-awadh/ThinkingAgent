@@ -1,0 +1,91 @@
+diff --git a/django/contrib/admin/sites.py b/django/contrib/admin/sites.py
+index 61be31d890..d79b60fc5d 100644
+--- a/django/contrib/admin/sites.py
++++ b/django/contrib/admin/sites.py
+@@ -453,7 +453,10 @@ class AdminSite:
+                 pass
+             else:
+                 if getattr(match.func, "should_append_slash", True):
+-                    return HttpResponsePermanentRedirect("%s/" % request.path)
++                    new_url = "%s/" % request.path
++                    if request.META.get('QUERY_STRING'):
++                        new_url += "?" + request.META['QUERY_STRING']
++                    return HttpResponsePermanentRedirect(new_url)
+         raise Http404
+
+     def _build_app_dict(self, request, label=None):
+diff --git a/repro_urls.py b/repro_urls.py
+new file mode 100644
+index 0000000000..dfc73621fa
+--- /dev/null
++++ b/repro_urls.py
+@@ -0,0 +1,6 @@
++from django.contrib import admin
++from django.urls import path
++
++urlpatterns = [
++    path('admin/', admin.site.urls),
++]
+diff --git a/reproduce_append_slash_bug.py b/reproduce_append_slash_bug.py
+new file mode 100644
+index 0000000000..3e82d5062e
+--- /dev/null
++++ b/reproduce_append_slash_bug.py
+@@ -0,0 +1,57 @@
++import os
++import django
++from django.conf import settings
++from django.test import Client
++
++# This script attempts to reproduce the issue described in the PR.
++# Specifically, with APPEND_SLASH = True, query strings are lost
++# when the AdminSite.catch_all_view() performs the redirect.
++
++
++def main():
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            SECRET_KEY='dummy',
++            ALLOWED_HOSTS=['*'],
++            ROOT_URLCONF='repro_urls',
++
++            MIDDLEWARE=[
++                'django.contrib.sessions.middleware.SessionMiddleware',
++                'django.contrib.auth.middleware.AuthenticationMiddleware',
++                'django.middleware.common.CommonMiddleware',
++            ],
++            INSTALLED_APPS=[
++                'django.contrib.admin',
++                'django.contrib.auth',
++                'django.contrib.contenttypes',
++                'django.contrib.sessions',
++            ],
++            APPEND_SLASH=True,
++            DATABASES={
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++},
++        )
++    django.setup()
++    from django.contrib.auth.models import User
++    if not User.objects.filter(username='admin').exists():
++        User.objects.create_superuser('admin', 'admin@example.com', 'password')
++    client.login(username='admin', password='password')
++
++
++    client = Client()
++    # Trigger the catch_all_view by requesting a non-existent admin path.
++    # We also add a query parameter (?test=123) to see if it is preserved.
++    response = client.get('/admin/not-an-existing-page?test=123', follow=False)
++    print('Status code:', response.status_code)
++    print('Redirect URL:', response.url)
++
++    # If the query parameter is being preserved, the redirect URL should be
++    # something like '/admin/not-an-existing-page/?test=123'
++
++
++if __name__ == '__main__':
++    main()

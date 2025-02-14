@@ -1,0 +1,89 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 28374272f4..98953c51db 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -515,17 +515,25 @@ class Field(RegisterLookupMixin):
+
+     def __eq__(self, other):
+         # Needed for @total_ordering
+-        if isinstance(other, Field):
+-            return self.creation_counter == other.creation_counter
+-        return NotImplemented
++        if not isinstance(other, Field):
++            return NotImplemented
++        if self.model is not None and other.model is not None and self.model != other.model:
++            return False
++        return self.creation_counter == other.creation_counter
+
+     def __lt__(self, other):
+         # This is needed because bisect does not take a comparison function.
+-        if isinstance(other, Field):
++        if not isinstance(other, Field):
++            return NotImplemented
++        if self.creation_counter != other.creation_counter:
+             return self.creation_counter < other.creation_counter
+-        return NotImplemented
++        if self.model is not None and other.model is not None:
++            return self.model._meta.label < other.model._meta.label
++        return False
+
+     def __hash__(self):
++        if self.model is not None:
++            return hash((self.model._meta.label, self.creation_counter))
+         return hash(self.creation_counter)
+
+     def __deepcopy__(self, memodict):
+diff --git a/repro_error.py b/repro_error.py
+new file mode 100644
+index 0000000000..7222a18468
+--- /dev/null
++++ b/repro_error.py
+@@ -0,0 +1,48 @@
++import sys
++import os
++
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++        ],
++        DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++        SECRET_KEY='testkey',
++    )
++
++django.setup()
++
++from django.db import models
++
++class A(models.Model):
++    class Meta:
++        abstract = True
++    myfield = models.IntegerField()
++
++class B(A):
++    pass
++    class Meta:
++        app_label = 'anylabel'
++
++
++class C(A):
++    pass
++    class Meta:
++        app_label = 'anylabel'
++
++
++def main():
++    f1 = B._meta.get_field('myfield')
++    f2 = C._meta.get_field('myfield')
++
++    eq = (f1 == f2)
++    s = len({f1, f2})
++
++    print(f"B.myfield == C.myfield? {eq}")
++    print(f"len({{B.myfield, C.myfield}}) = {s}")
++
++if __name__ == "__main__":
++    main()

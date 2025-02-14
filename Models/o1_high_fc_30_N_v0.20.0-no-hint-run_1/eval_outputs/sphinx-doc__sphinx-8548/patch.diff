@@ -1,0 +1,92 @@
+diff --git a/repro_inherited_attr_error.py b/repro_inherited_attr_error.py
+new file mode 100644
+index 000000000..aaeaac402
+--- /dev/null
++++ b/repro_inherited_attr_error.py
+@@ -0,0 +1,65 @@
++import os
++import sys
++from subprocess import run
++
++script_dir = os.path.dirname(os.path.abspath(__file__))
++doc_dir = os.path.join(script_dir, 'repro_inherited_attr_error')
++
++os.makedirs(doc_dir, exist_ok=True)
++
++# Create a small python module that has a base class with an attribute,
++# and a child class that inherits it.
++module_code = """\
++class Base:
++    '''Base docstring.'''
++    base_attr = "This attribute is defined in the base class"
++
++class Child(Base):
++    '''Child docstring.'''
++    child_attr = "This attribute is defined in the child class"
++module_path = os.path.join(doc_dir, 'mymodule.py')
++with open(module_path, 'w') as f:
++    f.write(module_code)
++
++# Create conf.py
++conf_py = """\
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++extensions = [
++    'sphinx.ext.autodoc',
++]
++master_doc = 'index'
++project = 'TestInherited'
++version = '0.1'
++html_theme = 'alabaster'
++"""
++
++conf_path = os.path.join(doc_dir, 'conf.py')
++with open(conf_path, 'w') as f:
++    f.write(conf_py)
++
++# Create index.rst that documents Child with inherited-members. This should show base_attr.
++index_rst = """\
++Test for autodoc inherited attributes
++=====================================
++
++.. autofunction:: Child
++
++.. autoclass:: Child
++   :members:
++   :inherited-members:
++"""
++
++index_path = os.path.join(doc_dir, 'index.rst')
++with open(index_path, 'w') as f:
++    f.write(index_rst)
++
++# Run sphinx-build to confirm the error
++cmd = [sys.executable, '-m', 'sphinx', '-b', 'html', doc_dir, os.path.join(doc_dir, '_build')]
++result = run(cmd)
++
++if result.returncode == 0:
++    print("Sphinx build completed. Check if 'base_attr' doc is included in the output HTML.")
++else:
++    print("Sphinx build failed!")
+diff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py
+index d6e73d36a..c2201675f 100644
+--- a/sphinx/ext/autodoc/importer.py
++++ b/sphinx/ext/autodoc/importer.py
+@@ -315,6 +315,18 @@ def get_class_members(subject: Any, objpath: List[str], attrgetter: Callable,
+                 members[name] = ClassAttribute(subject, name, INSTANCEATTR,
+                                                '\n'.join(docstring))
+
++        # Also try to grab docstrings for inherited attributes
++        from sphinx.util.inspect import getmro
++        baseclasses = getmro(subject)
++        if len(baseclasses) > 1:
++            for basecls in baseclasses[1:]:
++                base_namespace = basecls.__module__ + '.' + basecls.__qualname__
++                for (ns, inherited_name), inherited_docstring in analyzer.attr_docs.items():
++                    if ns == base_namespace and inherited_name not in members:
++                        members[inherited_name] = ClassAttribute(
++                            basecls, inherited_name, INSTANCEATTR, '\n'.join(inherited_docstring)
++                        )
++
+     return members

@@ -1,0 +1,98 @@
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 000000000..b18078739
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,15 @@
++import os
++import subprocess
++
++def reproduce_error():
++    # Clone the repository
++    subprocess.run(['git', 'clone', 'https://github.com/13steinj/sphinx-issue-examples/'])
++    os.chdir('sphinx-issue-examples')
++    subprocess.run(['git', 'checkout', 'referenced_variables'])
++    os.chdir('docs')
++    subprocess.run(['make', 'html'])
++    os.chdir('_build/html')
++    subprocess.run(['python', '-m', 'SimpleHTTPServer', '8008'])
++
++if __name__ == '__main__':
++    reproduce_error()
+\ No newline at end of file
+diff --git a/sphinx-issue-examples b/sphinx-issue-examples
+new file mode 160000
+index 000000000..514cb558e
+--- /dev/null
++++ b/sphinx-issue-examples
+@@ -0,0 +1 @@
++Subproject commit 514cb558efd471f532cacffaf2eb7edffe11babe
+diff --git a/sphinx/ext/autodoc/directive.py b/sphinx/ext/autodoc/directive.py
+index c134258d0..99cc7b9ab 100644
+--- a/sphinx/ext/autodoc/directive.py
++++ b/sphinx/ext/autodoc/directive.py
+@@ -126,6 +126,13 @@ class AutodocDirective(SphinxDirective):
+
+         # generate the output
+         params = DocumenterBridge(self.env, reporter, documenter_options, lineno, self.state)
++        # Ensure instance variables are not linked to global variables
++        for name in params.result:
++            if name in self.env.app.registry.documenters:
++                if name not in self.env.app.registry.documenters:
++                    # This means it's a global variable, so we skip it
++                    continue
++                pass
+         documenter = doccls(params, self.arguments[0])
+         documenter.generate(more_content=self.content)
+         if not params.result:
+diff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py
+index 097dc6d07..ff6f13c25 100644
+--- a/sphinx/ext/autodoc/importer.py
++++ b/sphinx/ext/autodoc/importer.py
+@@ -173,6 +173,47 @@ class Attribute(NamedTuple):
+
+ def get_object_members(subject: Any, objpath: List[str], attrgetter: Callable,
+                        analyzer: ModuleAnalyzer = None) -> Dict[str, Attribute]:
++    instance_vars = set(dir(subject))  # Track instance variable names
++
++    # the members directly defined in the class
++    obj_dict = attrgetter(subject, '__dict__', {})
++
++    members = {}  # type: Dict[str, Attribute]
++
++    # enum members
++    if isenumclass(subject):
++        for name, value in subject.__members__.items():
++            if name not in members:
++                members[name] = Attribute(name, True, value)
++
++        superclass = subject.__mro__[1]
++        for name in obj_dict:
++            if name not in superclass.__dict__:
++                value = safe_getattr(subject, name)
++                members[name] = Attribute(name, True, value)
++
++    # members in __slots__
++    try:
++        __slots__ = getslots(subject)
++        if __slots__:
++            from sphinx.ext.autodoc import SLOTSATTR
++
++            for name in __slots__:
++                members[name] = Attribute(name, True, SLOTSATTR)
++    except (AttributeError, TypeError, ValueError):
++        pass
++
++    # other members
++    for name in dir(subject):
++        try:
++            value = attrgetter(subject, name)
++            directly_defined = name in obj_dict
++            name = unmangle(subject, name)
++            if name and name not in members:
++                if name in instance_vars:
++                    members[name] = Attribute(name, directly_defined, value)
++        except AttributeError:
++            continue
+     """Get members and attributes of target object."""
+     from sphinx.ext.autodoc import INSTANCEATTR

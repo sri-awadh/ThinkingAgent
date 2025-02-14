@@ -1,0 +1,91 @@
+diff --git a/reproduce_mod_error.py b/reproduce_mod_error.py
+new file mode 100644
+index 0000000000..248c615c9d
+--- /dev/null
++++ b/reproduce_mod_error.py
+@@ -0,0 +1,73 @@
++import sys
++# This script attempts to reproduce a scenario where a MOD operation combines numeric expressions
++# of possibly differing types (e.g. Decimal and Integer) and is not resolving to the correct output_field.
++
++# We'll set up a minimal Django environment and run a small snippet that triggers the SQL with a MOD operation.
++
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++if not settings.configured:
++    settings.configure(
++        SECRET_KEY='test',
++        INSTALLED_APPS=('testapp.apps.TestappConfig',),
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++    )
++
++django.setup()
++
++class DecimalModel(models.Model):
++    decimal_field = models.DecimalField(max_digits=5, decimal_places=2)
++    integer_field = models.IntegerField()
++
++# Create a test application so migrations can detect it.
++os.makedirs(os.path.join(BASE_DIR, 'testapp'), exist_ok=True)
++with open(os.path.join(BASE_DIR, 'testapp', '__init__.py'), 'w'):
++    pass
++with open(os.path.join(BASE_DIR, 'testapp', 'models.py'), 'w') as f:
++    f.write('''
++from django.db import models
++
++class DecimalModel(models.Model):
++    decimal_field = models.DecimalField(max_digits=5, decimal_places=2)
++    integer_field = models.IntegerField()
++''')
++
++# Now perform migrations
++from django.core.management import call_command
++call_command('makemigrations', 'testapp', verbosity=0)
++call_command('migrate', verbosity=0)
++
++# Insert test data
++DecimalModel.objects.create(decimal_field="9.99", integer_field=2)
++DecimalModel.objects.create(decimal_field="10.50", integer_field=4)
++
++# Attempt to do a query with a MOD operation
++# We'll import ExpressionWrapper/Func to replicate the issue, if necessary
++from django.db.models import F, DecimalField, ExpressionWrapper
++from django.db.models.expressions import Func
++
++class Mod(Func):
++    function = '%%'
++
++qs = DecimalModel.objects.annotate(
++    mod_result=Mod(F('decimal_field'), F('integer_field'), output_field=None)
++)
++
++try:
++    results = list(qs)
++    for r in results:
++        print("mod_result:", r.mod_result)
++    print("Success: The script did not raise an error for the MOD expression.")
++except Exception as e:
++    print("Error encountered while performing MOD operation with mixed numeric types:", e)
++    sys.exit(1)
+\ No newline at end of file
+diff --git a/testapp/apps.py b/testapp/apps.py
+new file mode 100644
+index 0000000000..dc24defcca
+--- /dev/null
++++ b/testapp/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++
++class TestappConfig(AppConfig):
++    name = 'testapp'
+\ No newline at end of file

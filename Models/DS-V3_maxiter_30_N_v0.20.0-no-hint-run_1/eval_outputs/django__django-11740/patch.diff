@@ -1,0 +1,93 @@
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index 402dae2829..d5aa67cb33 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -228,10 +228,14 @@ class AlterField(FieldOperation):
+             for n, f in
+             state.models[app_label, self.model_name_lower].fields
+         ]
+-        # TODO: investigate if old relational fields must be reloaded or if it's
+-        # sufficient if the new field is (#27737).
++        # When changing to a relational field, ensure the related model is loaded
++        if field.is_relation and not isinstance(self.field, type(from_state.models[app_label, self.model_name_lower].get_field_by_name(self.name)[0])):
++            # Add dependency on the related model
++            related_app_label, related_model_name = self.field.remote_field.model._meta.app_label, self.field.remote_field.model._meta.model_name
++            state.add_dependency((related_app_label, related_model_name), app_label)
++
+         # Delay rendering of relationships if it's not a relational field and
+-        # not referenced by a foreign key.
++        # not referenced by a foreign key
+         delay = (
+             not field.is_relation and
+             not is_referenced_by_foreign_key(state, self.model_name_lower, self.field, self.name)
+diff --git a/tests/migrations/runtests.py b/tests/migrations/runtests.py
+new file mode 100644
+index 0000000000..29245114d3
+--- /dev/null
++++ b/tests/migrations/runtests.py
+@@ -0,0 +1,37 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++def run_tests():
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.migrations.settings'
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            },
++            'other': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.db.migrations',
++            'tests.migrations.apps.MigrationsConfig',
++        ],
++        SECRET_KEY='django-insecure-test-key-for-testing-only',
++        DEFAULT_AUTO_FIELD='django.db.models.AutoField',
++        MIDDLEWARE_CLASSES=[],
++    )
++    django.setup()
++
++    from django.test.runner import DiscoverRunner
++    test_runner = DiscoverRunner(verbosity=1)
++    failures = test_runner.run_tests(['tests.migrations.test_operations'])
++    sys.exit(bool(failures))
++
++if __name__ == '__main__':
++    run_tests()
+\ No newline at end of file
+diff --git a/tests/settings.py b/tests/settings.py
+new file mode 100644
+index 0000000000..6cabe1f6f3
+--- /dev/null
++++ b/tests/settings.py
+@@ -0,0 +1,20 @@
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.migrations',
++        ],
++        SECRET_KEY='django-insecure-test-key-for-testing-only',
++        DEFAULT_AUTO_FIELD='django.db.models.AutoField',
++    )
++    django.setup()
+\ No newline at end of file

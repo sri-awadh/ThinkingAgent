@@ -1,0 +1,143 @@
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index c5d87f647a..82d6e478d8 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -63,6 +63,8 @@ and two directions (forward and reverse) for a total of six combinations.
+    ``ReverseManyToManyDescriptor``, use ``ManyToManyDescriptor`` instead.
+ """
+
++from asgiref.sync import sync_to_async
++
+ from django.core.exceptions import FieldError
+ from django.db import (
+     DEFAULT_DB_ALIAS,
+@@ -809,6 +811,18 @@ def create_reverse_many_to_one_manager(superclass, rel):
+
+         update_or_create.alters_data = True
+
++        async def acreate(self, **kwargs):
++            return await sync_to_async(self.create)(**kwargs)
++        acreate.alters_data = True
++
++        async def aget_or_create(self, **kwargs):
++            return await sync_to_async(self.get_or_create)(**kwargs)
++        aget_or_create.alters_data = True
++
++        async def aupdate_or_create(self, **kwargs):
++            return await sync_to_async(self.update_or_create)(**kwargs)
++        aupdate_or_create.alters_data = True
++
+         # remove() and clear() are only provided if the ForeignKey can have a
+         # value of null.
+         if rel.field.null:
+@@ -1190,6 +1204,26 @@ def create_forward_many_to_many_manager(superclass, rel, reverse):
+             return new_obj
+
+         create.alters_data = True
++        async def acreate(self, *, through_defaults=None, **kwargs):
++            return await sync_to_async(self.create)(through_defaults=through_defaults, **kwargs)
++        acreate.alters_data = True
++
++        async def aget_or_create(self, *, through_defaults=None, **kwargs):
++            return await sync_to_async(self.get_or_create)(through_defaults=through_defaults, **kwargs)
++        aget_or_create.alters_data = True
++
++        def update_or_create(self, *, through_defaults=None, defaults=None, **kwargs):
++            db = router.db_for_write(self.instance.__class__, instance=self.instance)
++            obj, created = super(ManyRelatedManager, self.db_manager(db)).update_or_create(defaults=defaults, **kwargs)
++            if created:
++                self.add(obj, through_defaults=through_defaults)
++            return obj, created
++        update_or_create.alters_data = True
++
++        async def aupdate_or_create(self, *, through_defaults=None, defaults=None, **kwargs):
++            return await sync_to_async(self.update_or_create)(through_defaults=through_defaults, defaults=defaults, **kwargs)
++        aupdate_or_create.alters_data = True
++
+
+         def get_or_create(self, *, through_defaults=None, **kwargs):
+             db = router.db_for_write(self.instance.__class__, instance=self.instance)
+diff --git a/manage.py b/manage.py
+new file mode 100644
+index 0000000000..51e29f0cc0
+--- /dev/null
++++ b/manage.py
+@@ -0,0 +1,15 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++
++def main():
++    # Point Django to the same settings we configure in our script.
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', '__main__')
++    # Perform Django setup (will pick up the in-memory settings from our script)
++    django.setup()
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_async.py b/test_async.py
+new file mode 100644
+index 0000000000..c29b111def
+--- /dev/null
++++ b/test_async.py
+@@ -0,0 +1,57 @@
++import asyncio
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.core.management import execute_from_command_line
++
++# We'll create a minimal Django settings configuration for an in-memory DB.
++settings.configure(
++    SECRET_KEY='fake-key',
++    INSTALLED_APPS=[__name__, 'django.contrib.contenttypes'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++# Initialize Django.
++django.setup()
++
++class Parent(models.Model):
++    name = models.CharField(max_length=50)
++
++    class Meta:
++        app_label = 'test_async'
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='children')
++    name = models.CharField(max_length=50)
++    class Meta:
++        app_label = 'test_async'
++
++async def test_related_manager_async_methods():
++    # Attempt to use acreate() on a related manager.
++    parent = await Parent.objects.acreate(name='Test Parent')
++    # Now let's call acreate on the related manager.
++    child = await parent.children.acreate(name='Child 1')
++    print("Created child:", child)
++
++    # Attempt to use aget_or_create() on the related manager.
++    child2, created = await parent.children.aget_or_create(name='Child 2')
++    print("Get_or_create child:", child2, created)
++
++    # Attempt to use aupdate_or_create() on the related manager.
++    child3, created = await parent.children.aupdate_or_create(name='Child 2', defaults={"name": "Child2 updated"})
++    print("Update_or_create child:", child3, created)
++
++async def main():
++    # Prepare the database.
++    execute_from_command_line(['manage.py', 'migrate', '--run-syncdb'])
++    # Now run our test.
++    await test_related_manager_async_methods()
++
++if __name__ == "__main__":
++    asyncio.run(main())

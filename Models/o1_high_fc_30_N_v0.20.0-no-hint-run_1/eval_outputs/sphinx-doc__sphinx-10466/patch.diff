@@ -1,0 +1,96 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..84c72ff29
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,60 @@
++import subprocess
++import os
++
++def main():
++    # Attempt to reproduce the duplicated location lines in the .pot file
++
++    # We'll try to run "make clean; make gettext" from the top-level if a Makefile is found.
++    if os.path.exists("Makefile"):
++        # The top-level Makefile doesn't directly have a 'gettext' target, but it has 'docs' with an optional 'target' variable.
++        subprocess.run(["make", "docs", "target=clean"])
++        subprocess.run(["make", "docs", "target=gettext"])
++    elif os.path.exists(os.path.join("doc", "Makefile")):
++        subprocess.run(["make", "-C", "doc", "clean"])
++        subprocess.run(["make", "-C", "doc", "gettext"])
++    else:
++        # If neither is found, we do a direct sphinx-build.
++        print("No suitable Makefile found for 'clean' and 'gettext' targets.")
++        print("Try running manually: sphinx-build -b gettext doc doc/_build/gettext")
++        return
++
++    # We guess the pot files might be generated under "_build/gettext" or "doc/_build/gettext".
++    pot_candidates = [
++        os.path.join("_build", "gettext"),
++        os.path.join("doc", "_build", "gettext"),
++        os.path.join("build", "gettext"),
++    ]
++
++    pot_files = []
++    for candidate in pot_candidates:
++        if os.path.isdir(candidate):
++            for f in os.listdir(candidate):
++                if f.endswith(".pot"):
++                    pot_files.append(os.path.join(candidate, f))
++
++    if not pot_files:
++        print("No .pot files found, cannot check for duplicates.")
++        return
++
++    # Look for repeated lines.
++    found_duplicates = False
++    for pot_file in pot_files:
++        with open(pot_file, encoding="utf-8") as pf:
++            lines = pf.readlines()
++        duplicates = {}  # line -> count
++        for line in lines:
++            if line.startswith('#:'):
++                duplicates[line.strip()] = duplicates.get(line.strip(), 0) + 1
++        # Print out duplicates > 1
++        for line_str, cnt in duplicates.items():
++            if cnt > 1:
++                if not found_duplicates:
++                    print("Duplicates found in:" + pot_file)
++                    found_duplicates = True
++                print(f"   {line_str} appears {cnt} times")
++
++    if not found_duplicates:
++        print("No duplicate lines found.")
++
++if __name__ == "__main__":
++    main()
+diff --git a/sphinx/builders/gettext.py b/sphinx/builders/gettext.py
+index e8bc547b7..b091ce21f 100644
+--- a/sphinx/builders/gettext.py
++++ b/sphinx/builders/gettext.py
+@@ -32,9 +32,12 @@ class Message:
+     """An entry of translatable message."""
+     def __init__(self, text: str, locations: List[Tuple[str, int]], uuids: List[str]):
+         self.text = text
+-        self.locations = locations
++        self.locations = self._unique_locations(locations)
+         self.uuids = uuids
+
++    def _unique_locations(self, locations: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
++        return list(set(locations))
++
+
+ class Catalog:
+     """Catalog of translatable messages."""
+@@ -53,7 +56,10 @@ class Catalog:
+         if msg not in self.metadata:  # faster lookup in hash
+             self.messages.append(msg)
+             self.metadata[msg] = []
+-        self.metadata[msg].append((origin.source, origin.line, origin.uid))  # type: ignore
++        # Only add if not already present by path & line, ignore different UIDs
++        existing_locations = {(s, l) for (s, l, u) in self.metadata[msg]}
++        if (origin.source, origin.line) not in existing_locations:
++            self.metadata[msg].append((origin.source, origin.line, origin.uid))  # type: ignore
+
+     def __iter__(self) -> Generator[Message, None, None]:
+         for message in self.messages:

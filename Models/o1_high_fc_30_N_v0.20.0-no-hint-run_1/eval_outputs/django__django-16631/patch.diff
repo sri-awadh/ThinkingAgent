@@ -1,0 +1,147 @@
+diff --git a/django/contrib/sessions/backends/signed_cookies.py b/django/contrib/sessions/backends/signed_cookies.py
+index dc41c6f12b..e605f58873 100644
+--- a/django/contrib/sessions/backends/signed_cookies.py
++++ b/django/contrib/sessions/backends/signed_cookies.py
+@@ -1,6 +1,8 @@
+ from django.contrib.sessions.backends.base import SessionBase
+ from django.core import signing
++from django.conf import settings
+
++from django.core.signing import TimestampSigner, _cookie_signer_key
+
+ class SessionStore(SessionBase):
+     def load(self):
+@@ -16,6 +18,7 @@ class SessionStore(SessionBase):
+                 # This doesn't handle non-default expiry dates, see #19201
+                 max_age=self.get_session_cookie_age(),
+                 salt="django.contrib.sessions.backends.signed_cookies",
++                fallback_keys=settings.SECRET_KEY_FALLBACKS,
+             )
+         except Exception:
+             # BadSignature, ValueError, or unpickling exceptions. If any of
+diff --git a/reproduce_bug.py b/reproduce_bug.py
+new file mode 100644
+index 0000000000..91d6ba8ac5
+--- /dev/null
++++ b/reproduce_bug.py
+@@ -0,0 +1,120 @@
++import django
++import sys
++from django.conf import settings
++from django.contrib.sessions.backends.signed_cookies import SessionStore
++
++def main():
++    if not settings.configured:
++        settings.configure(
++            SECRET_KEY='OLD_SECRET_KEY_123',
++            SECRET_KEY_FALLBACKS=[],
++            INSTALLED_APPS=[
++                'django.contrib.auth',
++                'django.contrib.contenttypes',
++                'django.contrib.sessions',
++            ],
++        )
++    django.setup()
++
++    session = SessionStore()
++    session['foo'] = 'bar'
++    session.save()
++    session_cookie = session.session_key
++    print('Session created with old key:', session_cookie)
++
++    # Rotate the key.
++    settings.SECRET_KEY = 'NEW_SECRET_KEY_ABC'
++    settings.SECRET_KEY_FALLBACKS = ['OLD_SECRET_KEY_123']
++
++    new_session = SessionStore(session_key=session_cookie)
++    data = new_session.load()
++    if 'foo' in data:
++        print('SUCCESS: Fallback logic retained data:', data)
++    else:
++        print('FAILURE: Fallback logic did not keep session data.')
++
++if __name__ == '__main__':
++    main()
++
++
++from django.contrib.sessions.backends.signed_cookies import SessionStore
++from django.utils.crypto import salted_hmac
++
++
++def main():
++    # Fake basic settings.
++    # We'll forcibly configure Django here in this script.
++    # We set an original SECRET_KEY and one fallback, or vice versa.
++    if not settings.configured:
++        settings.configure(
++            SECRET_KEY='ORIGINAL_KEY_123',
++            SECRET_KEY_FALLBACKS=['OLD_KEY_456'],
++            INSTALLED_APPS=[
++                'django.contrib.auth',
++                'django.contrib.contenttypes',
++                'django.contrib.sessions',
++            ],
++            MIDDLEWARE=[
++                'django.contrib.sessions.middleware.SessionMiddleware',
++                'django.contrib.auth.middleware.AuthenticationMiddleware',
++            ],
++            ROOT_URLCONF=__name__
++        )
++    django.setup()
++
++    # Create a session store with the original SECRET_KEY.
++    # We'll store some data in it.
++    session = SessionStore()
++    session['foo'] = 'bar'
++    session.save()
++
++    session_cookie = session.session_key
++
++    print("Session key with old SECRET_KEY:", session_cookie)
++
++    # Next, pretend we've rotated the SECRET_KEY.
++    # We'll do that by reconfiguring the settings with a new key.
++    # We'll put Original key in SECRET_KEY_FALLBACKS.
++    # The user would expect that the old session is still valid.
++
++    # We'll flush the settings though, so we can re-init.
++    django.utils.translation.trans_real._default = None
++
++    settings._wrapped = None
++
++    new_key = 'NEW_KEY_ABC'
++    old_key = 'ORIGINAL_KEY_123'  # we now put old key in fallback.
++
++    settings.configure(
++        SECRET_KEY=new_key,
++        SECRET_KEY_FALLBACKS=[old_key, 'OLD_KEY_456'],
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++            'django.contrib.sessions',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++        ],
++        ROOT_URLCONF=__name__
++    )
++    django.setup()
++
++    # Now let's try verifying the old session cookie.
++    # If fallback logic is broken, this will fail.
++
++    # We'll create a new session store from that old cookie,
++    # if the fallback isn't working, load() will produce an empty dict.
++
++    new_session = SessionStore(session_key=session_cookie)
++    data = new_session.load()
++
++    if 'foo' in data:
++        print("SUCCESS: The old session data is still valid (fallback worked).")
++    else:
++        print("FAILURE: The old session was invalidated (fallback did NOT work).")
++
++
++if __name__ == '__main__':
++    main()

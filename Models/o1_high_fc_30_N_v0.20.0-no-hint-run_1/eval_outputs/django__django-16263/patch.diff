@@ -1,0 +1,94 @@
+diff --git a/db.sqlite3 b/db.sqlite3
+new file mode 100644
+index 0000000000..55d7532a96
+Binary files /dev/null and b/db.sqlite3 differ
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 9735ce10c8..08dda4e1a3 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -548,8 +548,15 @@ class Query(BaseExpression):
+     def get_count(self, using):
+         """
+         Perform a COUNT() query using the current filter constraints.
++        Strips out any annotations that are not referenced by filters or ordering.
+         """
+         obj = self.clone()
++        if not (obj.distinct and obj.is_sliced):
++            if obj.group_by is True:
++                obj.add_fields((f.attname for f in self.model._meta.concrete_fields), False)
++                obj.set_group_by(allow_aliases=False)
++            obj.clear_select_clause()
++        obj.clear_ordering(force=True)
+         obj.add_annotation(Count("*"), alias="__count", is_summary=True)
+         return obj.get_aggregation(using, ["__count"])["__count"]
+
+diff --git a/repro_count_annotation_bug.py b/repro_count_annotation_bug.py
+new file mode 100644
+index 0000000000..b8f81f47ef
+--- /dev/null
++++ b/repro_count_annotation_bug.py
+@@ -0,0 +1,64 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Count
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++if os.path.exists(os.path.join(BASE_DIR, 'db.sqlite3')):
++    os.remove(os.path.join(BASE_DIR, 'db.sqlite3'))
++
++
++# Minimal Django settings:
++settings.configure(
++    SECRET_KEY='test',
++    DEBUG=True,
++    ALLOWED_HOSTS=['*'],
++    INSTALLED_APPS=[
++        __name__,
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
++        }
++    },
++)
++
++django.setup()
++
++class Book(models.Model):
++    title = models.CharField(max_length=200)
++
++class Chapter(models.Model):
++    book = models.ForeignKey(Book, related_name='chapters', on_delete=models.CASCADE)
++    title = models.CharField(max_length=200)
++
++
++def main():
++    # Create tables.
++    with django.db.connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Book)
++        schema_editor.create_model(Chapter)
++        # Insert sample data.
++        b = Book.objects.create(title='My Great Book')
++        Chapter.objects.create(book=b, title='Chapter 1')
++        Chapter.objects.create(book=b, title='Chapter 2')
++
++    # Now run the query with annotation:
++    # We'll do Book.objects.annotate(Count('chapters')).count()
++    # and capture the debug output.
++    from django.db import connection
++    with connection.cursor() as cursor:
++        # First, to see the raw statements, enable debug.
++        pass
++    # Now do the count:
++    queryset = Book.objects.annotate(ch_count=Count('chapters'))
++    count_val = queryset.count()
++    print("Count:", count_val)
++    # We can also show the query generated:
++    print("Query:", str(queryset.query))
++
++if __name__ == '__main__':
++    main()

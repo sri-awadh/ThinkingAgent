@@ -1,0 +1,146 @@
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index b192df4fbf..5241bc07ac 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -712,6 +712,7 @@ def create_reverse_many_to_one_manager(superclass, rel):
+             if queryset is None:
+                 queryset = super().get_queryset()
+
++                queryset._allow_sliced_filtering = True
+             queryset._add_hints(instance=instances[0])
+             queryset = queryset.using(queryset._db or self._db)
+
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index be0deb90b0..d4dcdbc274 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -1438,7 +1438,7 @@ class QuerySet:
+         return self._filter_or_exclude(True, args, kwargs)
+
+     def _filter_or_exclude(self, negate, args, kwargs):
+-        if (args or kwargs) and self.query.is_sliced:
++        if (args or kwargs) and self.query.is_sliced and not getattr(self, '_allow_sliced_filtering', False):
+             raise TypeError("Cannot filter a query once a slice has been taken.")
+         clone = self._chain()
+         if self._defer_next_filter:
+diff --git a/reproduce_prefetch_slice_error.py b/reproduce_prefetch_slice_error.py
+new file mode 100644
+index 0000000000..34f8b62c60
+--- /dev/null
++++ b/reproduce_prefetch_slice_error.py
+@@ -0,0 +1,115 @@
++import os
++import sys
++
++def main():
++    # We'll set up a minimal Django environment in memory.
++    import django
++    from django.conf import settings
++
++    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++    if not settings.configured:
++        settings.configure(
++            SECRET_KEY='test-key',
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++                'testapp',
++            ],
++            MIDDLEWARE_CLASSES=[],
++            MIGRATION_MODULES={'testapp': None},
++        )
++        import django
++        django.setup()
++
++    from django.core.management import call_command
++
++    # Create an app named "testapp" on the fly.
++    # We'll place models in that app.
++
++    # We'll make sure we can create the migrations.
++    # But we actually need a real or faked "apps.py" for it to appear as an INSTALLED_APP.
++
++    # We'll create the modules at runtime.
++    import types
++    import django.apps
++    import django.db.models as models
++
++    # We define the testapp.
++
++    testapp = types.ModuleType('testapp')
++    testapp.__file__ = __file__
++    testapp.__path__ = []
++    sys.modules['testapp'] = testapp
++
++    # We'll define an apps.py for that module.
++    apps_py = types.ModuleType('testapp.apps')
++    sys.modules['testapp.apps'] = apps_py
++    apps_py.AppConfig = type('TestappConfig', (django.apps.AppConfig,), {'name': 'testapp'})
++
++    class Category(models.Model):
++        name = models.CharField(max_length=100)
++
++        class Meta:
++            app_label = 'testapp'
++
++    class Post(models.Model):
++        category = models.ForeignKey(Category, on_delete=models.CASCADE)
++        title = models.CharField(max_length=100)
++
++        class Meta:
++            app_label = 'testapp'
++
++    # We'll attach them to testapp module.
++    testapp.models = types.ModuleType('testapp.models')
++    testapp.models.Category = Category
++    testapp.models.Post = Post
++
++    django.setup()
++
++    # Make migrations.
++    call_command('makemigrations', 'testapp', verbosity=0)
++    call_command('migrate', verbosity=0)
++
++    # Now let's create some data.
++    cat1 = Category.objects.create(name='Cat1')
++    cat2 = Category.objects.create(name='Cat2')
++
++    Post.objects.create(category=cat1, title='Post A1')
++    Post.objects.create(category=cat1, title='Post A2')
++    Post.objects.create(category=cat1, title='Post A3')
++    Post.objects.create(category=cat1, title='Post A4')
++
++    Post.objects.create(category=cat2, title='Post B1')
++    Post.objects.create(category=cat2, title='Post B2')
++    Post.objects.create(category=cat2, title='Post B3')
++
++    from django.db.models import Prefetch
++
++    # Now let's do the prefetch call that is supposed to cause the error.
++    # We want only a slice of posts, e.g. first 3.
++
++    try:
++        categories = Category.objects.prefetch_related(
++            Prefetch(
++                'post',
++                queryset=Post.objects.all()[:3],
++                to_attr='example_posts'
++            )
++        )
++        # We'll evaluate the queryset.
++        results = list(categories)
++        for cat in results:
++            print(f'Category: {cat.name} -> example_posts: {[p.title for p in cat.example_posts]}')
++        print("SUCCESS: No error encountered. If the code hasn't been patched, we might see an error.")
++    except Exception as e:
++        print("ERROR encountered:", e)
++
++if __name__ == '__main__':
++    main()

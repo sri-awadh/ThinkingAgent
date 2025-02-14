@@ -1,0 +1,52 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fafc1beee8..5fa0b7bd31 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -422,6 +422,47 @@ class KeyTransformExact(JSONExact):
+             )
+         return super().as_sql(compiler, connection)
+
++class KeyTransformIn(lookups.In):
++    def process_rhs(self, compiler, connection):
++        rhs, rhs_params = super().process_rhs(compiler, connection)
++        if not rhs_params:
++            return rhs, rhs_params
++
++        if connection.vendor in ('mysql', 'sqlite'):
++            func = []
++            for value in rhs_params:
++                if connection.vendor == 'mysql':
++                    func.append("JSON_EXTRACT(%s, '$')")
++                else:  # sqlite
++                    func.append("JSON_EXTRACT(%s, '$')" if value != 'null' else '%s')
++            rhs = rhs % tuple(func)
++        elif connection.vendor == 'oracle':
++            func = []
++            for value in rhs_params:
++                value = json.loads(value)
++                function = 'JSON_QUERY' if isinstance(value, (list, dict)) else 'JSON_VALUE'
++                func.append("%s('%s', '$.value')" % (
++                    function,
++                    json.dumps({'value': value}),
++                ))
++            rhs = rhs % tuple(func)
++            rhs_params = []
++        return rhs, rhs_params
++
++    def as_sql(self, compiler, connection):
++        lhs_sql, params = self.process_lhs(compiler, connection)
++        rhs_sql, rhs_params = self.process_rhs(compiler, connection)
++        params.extend(rhs_params)
++
++        if connection.vendor == 'mysql':
++            return 'JSON_CONTAINS(%s, %s)' % (rhs_sql, lhs_sql), params
++        elif connection.vendor == 'oracle':
++            return 'EXISTS (SELECT 1 FROM JSON_TABLE(%s, \'$[*]\' COLUMNS (value VARCHAR2(4000) PATH \'$\')) WHERE value = %s)' % (rhs_sql, lhs_sql), params
++
++        return super().as_sql(compiler, connection)
++
++KeyTransform.register_lookup(KeyTransformIn)
++
+
+ class KeyTransformIExact(CaseInsensitiveMixin, KeyTransformTextLookupMixin, lookups.IExact):
+     pass

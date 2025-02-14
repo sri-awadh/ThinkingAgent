@@ -1,0 +1,108 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 7effb202e3..6ffa893c71 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -578,6 +578,26 @@ class BaseModelFormSet(BaseFormSet):
+         self.initial_extra = initial
+         super().__init__(**{'data': data, 'files': files, 'auto_id': auto_id, 'prefix': prefix, **kwargs})
+
++class EditOnlyModelFormSet(BaseModelFormSet):
++    can_add_new = False
++
++    def add_fields(self, form, index):
++        super().add_fields(form, index)
++        form.fields[self._total_form_count_field].widget.attrs['readonly'] = True
++
++    def _construct_forms(self):
++        forms = super()._construct_forms()
++        if not self.can_add_new:
++            for form in forms:
++                if form.instance.pk is None:
++                    form.cleaned_data = {}
++                    form.instance = None
++        return forms
++
++    def save_new(self, form, commit=True):
++        if not self.can_add_new:
++            return None
++        return super().save_new(form, commit=commit)
+     def initial_form_count(self):
+         """Return the number of forms that are required in this FormSet."""
+         if not self.is_bound:
+diff --git a/tests/test_formset.py b/tests/test_formset.py
+new file mode 100644
+index 0000000000..89ec53e44a
+--- /dev/null
++++ b/tests/test_formset.py
+@@ -0,0 +1,70 @@
++import unittest
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase, override_settings
++from django.forms import modelformset_factory
++from django.forms.models import BaseModelFormSet
++
++settings.configure(
++    INSTALLED_APPS=['django.forms'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    DEFAULT_AUTO_FIELD='django.db.models.BigAutoField',
++)
++
++django.setup()
++
++class EditOnlyModelFormSet(BaseModelFormSet):
++    can_add_new = False
++
++    def add_fields(self, form, index):
++        super().add_fields(form, index)
++        form.fields[self._total_form_count_field].widget.attrs['readonly'] = True
++
++    def _construct_forms(self):
++        forms = super()._construct_forms()
++        if not self.can_add_new:
++            for form in forms:
++                if form.instance.pk is None:
++                    form.cleaned_data = {}
++                    form.instance = None
++        return forms
++
++    def save_new(self, form, commit=True):
++        if not self.can_add_new:
++            return None
++        return super().save_new(form, commit=commit)
++
++class SomeModel(models.Model):
++    name = models.CharField(max_length=100)
++
++    class Meta:
++        app_label = 'test_app'
++
++class TestModelFormset(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        cls.SomeFormSet = modelformset_factory(SomeModel, fields=('name',), formset=EditOnlyModelFormSet, extra=0)
++        SomeModel.objects.create(name='Item 1')
++        SomeModel.objects.create(name='Item 2')
++
++    def test_extra_forms(self):
++        # Simulate POST data with extra forms
++        post_data = {
++            'form-TOTAL_FORMS': '3',  # Asking for 3 forms
++            'form-INITIAL_FORMS': '2',  # 2 initial forms
++            'form-0-id': '1',
++            'form-0-name': 'Item 1 updated',
++            'form-1-id': '2',
++            'form-1-name': 'Item 2 updated',
++            'form-2-name': 'New Item',  # This is an extra form
++        }
++        formset = self.SomeFormSet(post_data, queryset=SomeModel.objects.all(), prefix='form')
++        self.assertTrue(formset.is_valid())
++        formset.save()
++        self.assertEqual(SomeModel.objects.count(), 2)  # New item should not be created
+\ No newline at end of file

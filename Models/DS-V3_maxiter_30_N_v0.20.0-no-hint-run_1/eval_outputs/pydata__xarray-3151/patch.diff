@@ -1,0 +1,114 @@
+diff --git a/xarray/core/combine.py b/xarray/core/combine.py
+index 37ae903b..e3dea1f2 100644
+--- a/xarray/core/combine.py
++++ b/xarray/core/combine.py
+@@ -178,7 +178,26 @@ def _combine_nd(combined_ids, concat_dims, data_vars='all',
+                                                     coords=coords,
+                                                     compat=compat,
+                                                     fill_value=fill_value)
++
+     (combined_ds,) = combined_ids.values()
++
++    # Skip monotonic check for dimensions where coordinates are identical across all datasets
++    if len(combined_ids) > 1:
++        first_ds = next(iter(combined_ids.values()))
++        for dim in first_ds.dims:
++            if dim in first_ds:
++                all_identical = all(
++                    (ds[dim].values == first_ds[dim].values).all()
++                    for ds in combined_ids.values()
++                )
++                if all_identical:
++                    continue
++                indexes = combined_ds.indexes.get(dim)
++                if not (indexes.is_monotonic_increasing or indexes.is_monotonic_decreasing):
++                    raise ValueError("Resulting object does not have monotonic"
++                                   " global indexes along dimension {}"
++                                   .format(dim))
++
+     return combined_ds
+
+
+@@ -209,9 +228,30 @@ def _combine_1d(datasets, concat_dim, compat='no_conflicts', data_vars='all',
+     """
+
+     if concat_dim is not None:
++        # Check if coordinates are identical across all datasets
++        first_ds = datasets[0]
++        identical_coords = {}
++        for dim in first_ds.dims:
++            if dim in first_ds:
++                all_identical = all(
++                    (ds[dim].values == first_ds[dim].values).all()
++                    for ds in datasets[1:]
++                )
++                identical_coords[dim] = all_identical
++
+         try:
+             combined = concat(datasets, dim=concat_dim, data_vars=data_vars,
+                               coords=coords, fill_value=fill_value)
++
++            # Skip monotonic check for dimensions with identical coordinates
++            for dim, is_identical in identical_coords.items():
++                if is_identical:
++                    continue
++                indexes = combined.indexes.get(dim)
++                if not (indexes.is_monotonic_increasing or indexes.is_monotonic_decreasing):
++                    raise ValueError("Resulting object does not have monotonic"
++                                   " global indexes along dimension {}"
++                                   .format(dim))
+         except ValueError as err:
+             if "encountered unexpected variable" in str(err):
+                 raise ValueError("These objects cannot be combined using only "
+@@ -501,8 +541,19 @@ def combine_by_coords(datasets, compat='no_conflicts', data_vars='all',
+                                    fill_value=fill_value)
+
+         # Check the overall coordinates are monotonically increasing
++        # Skip check for dimensions where coordinates are identical across all datasets
+         for dim in concatenated.dims:
+             if dim in concatenated:
++                # Check if coordinates are identical across all datasets
++                first_coord = datasets[0][dim].values
++                all_identical = all(
++                    (ds[dim].values == first_coord).all()
++                    for ds in datasets[1:]
++                )
++                if all_identical:
++                    continue
++
++                # Only check monotonicity if coordinates are not identical
+                 indexes = concatenated.indexes.get(dim)
+                 if not (indexes.is_monotonic_increasing
+                         or indexes.is_monotonic_decreasing):
+diff --git a/xarray/core/concat.py b/xarray/core/concat.py
+index cd59d878..0a65f355 100644
+--- a/xarray/core/concat.py
++++ b/xarray/core/concat.py
+@@ -225,11 +225,27 @@ def _dataset_concat(datasets, dim, data_vars, coords, compat, positions,
+     dim, coord = _calc_concat_dim_coord(dim)
+     # Make sure we're working on a copy (we'll be loading variables)
+     datasets = [ds.copy() for ds in datasets]
++    # Check for identical coordinates across all datasets
++    identical_coords = {}
++    first_ds = datasets[0]
++    for dim_name in first_ds.dims:
++        if dim_name in first_ds:
++            all_identical = all(
++                (ds[dim_name].values == first_ds[dim_name].values).all()
++                for ds in datasets[1:]
++            )
++            identical_coords[dim_name] = all_identical
++
+     datasets = align(*datasets, join='outer', copy=False, exclude=[dim],
+                      fill_value=fill_value)
+
+     concat_over, equals = _calc_concat_over(datasets, dim, data_vars, coords)
+
++    # Skip monotonic check for dimensions with identical coordinates
++    for dim_name, is_identical in identical_coords.items():
++        if is_identical and dim_name in concat_over:
++            concat_over.remove(dim_name)
++
+     def insert_result_variable(k, v):
+         assert isinstance(v, Variable)
+         if k in datasets[0].coords:

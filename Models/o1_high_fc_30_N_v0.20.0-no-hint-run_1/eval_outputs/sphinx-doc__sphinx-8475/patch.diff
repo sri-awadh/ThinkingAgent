@@ -1,0 +1,127 @@
+diff --git a/_build/linkcheck_repro/.doctrees/environment.pickle b/_build/linkcheck_repro/.doctrees/environment.pickle
+new file mode 100644
+index 000000000..1460d4238
+Binary files /dev/null and b/_build/linkcheck_repro/.doctrees/environment.pickle differ
+diff --git a/_build/linkcheck_repro/.doctrees/index.doctree b/_build/linkcheck_repro/.doctrees/index.doctree
+new file mode 100644
+index 000000000..a14b7e7b0
+Binary files /dev/null and b/_build/linkcheck_repro/.doctrees/index.doctree differ
+diff --git a/_build/linkcheck_repro/output.json b/_build/linkcheck_repro/output.json
+new file mode 100644
+index 000000000..4418beb4e
+--- /dev/null
++++ b/_build/linkcheck_repro/output.json
+@@ -0,0 +1 @@
++{"filename": "index.rst", "lineno": 6, "status": "working", "code": 0, "uri": "https://idr.openmicroscopy.org/webclient/?show=well-119093", "info": ""}
+diff --git a/_build/linkcheck_repro/output.txt b/_build/linkcheck_repro/output.txt
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/docsource/conf.py b/docsource/conf.py
+new file mode 100644
+index 000000000..a8491d9a7
+--- /dev/null
++++ b/docsource/conf.py
+@@ -0,0 +1,4 @@
++# Minimal Sphinx configuration for the linkcheck reproduction scenario
++
++project = 'Linkcheck Repro'
++master_doc = 'index'
+diff --git a/docsource/index.rst b/docsource/index.rst
+new file mode 100644
+index 000000000..4b1637cb2
+--- /dev/null
++++ b/docsource/index.rst
+@@ -0,0 +1,6 @@
++Test linkcheck
++=============
++
++This is a test page with one potentially problematic link:
++
++`IDR Well Link <https://idr.openmicroscopy.org/webclient/?show=well-119093>`_
+diff --git a/linkcheck_repro.py b/linkcheck_repro.py
+new file mode 100644
+index 000000000..8b10318a3
+--- /dev/null
++++ b/linkcheck_repro.py
+@@ -0,0 +1,33 @@
++
++import os
++import subprocess
++import sys
++
++# This script will create a minimal docs folder with a suspicious link that triggers too many redirects with HEAD.
++# Then it will run the Sphinx linkcheck builder.
++
++DOCS_DIR = os.path.join(os.path.dirname(__file__), 'docsource')
++INDEX_RST = os.path.join(DOCS_DIR, 'index.rst')
++BUILD_DIR = os.path.join(os.path.dirname(__file__), '_build', 'linkcheck_repro')
++
++if not os.path.exists(DOCS_DIR):
++    os.makedirs(DOCS_DIR)
++
++# We will use a link that might cause HEAD to loop or fail. The user mentioned https://idr.openmicroscopy.org/webclient/?show=well-119093
++# In some cases, HEAD requests to this domain have caused infinite redirect loops.
++# We'll just use that link for reproduction.
++
++with open(INDEX_RST, 'w') as f:
++    f.write('''Test linkcheck\n=============\n\nThis is a test page with one potentially problematic link:\n\n`IDR Well Link <https://idr.openmicroscopy.org/webclient/?show=well-119093>`_\n''')
++
++# Now run Sphinx linkcheck builder
++cmd = [sys.executable, '-m', 'sphinx', '-b', 'linkcheck', DOCS_DIR, BUILD_DIR]
++print('Running:', ' '.join(cmd))
++
++proc = subprocess.run(cmd)
++
++print("Linkcheck return code:", proc.returncode)
++if proc.returncode != 0:
++    print("Linkcheck encountered an error (likely 'TooManyRedirects' or similar).")
++else:
++    print("Linkcheck finished successfully without error.")
+diff --git a/sphinx/builders/linkcheck.py b/sphinx/builders/linkcheck.py
+index 1dc0337c3..cad538fcd 100644
+--- a/sphinx/builders/linkcheck.py
++++ b/sphinx/builders/linkcheck.py
+@@ -20,12 +20,13 @@ from urllib.parse import unquote, urlparse
+
+ from docutils import nodes
+ from docutils.nodes import Node
+-from requests.exceptions import HTTPError
++from requests.exceptions import HTTPError, TooManyRedirects
+
+ from sphinx.application import Sphinx
+ from sphinx.builders import Builder
+ from sphinx.locale import __
+-from sphinx.util import encode_uri, logging, requests
++from sphinx.util import encode_uri, logging
++import requests as real_requests
+ from sphinx.util.console import darkgray, darkgreen, purple, red, turquoise  # type: ignore
+ from sphinx.util.nodes import get_node_line
+
+@@ -55,7 +56,7 @@ class AnchorCheckParser(HTMLParser):
+                 break
+
+
+-def check_anchor(response: requests.requests.Response, anchor: str) -> bool:
++def check_anchor(response: real_requests.Response, anchor: str) -> bool:
+     """Reads HTML data from a response object `response` searching for `anchor`.
+     Returns True if anchor was found, False otherwise.
+     """
+@@ -168,15 +169,12 @@ class CheckExternalLinksBuilder(Builder):
+                     try:
+                         # try a HEAD request first, which should be easier on
+                         # the server and the network
+-                        response = requests.head(req_url, allow_redirects=True,
+-                                                 config=self.app.config, auth=auth_info,
+-                                                 **kwargs)
++                        response = real_requests.head(req_url, allow_redirects=True, auth=auth_info, **kwargs)
+                         response.raise_for_status()
+-                    except HTTPError:
++                    except (HTTPError, TooManyRedirects):
+                         # retry with GET request if that fails, some servers
+                         # don't like HEAD requests.
+-                        response = requests.get(req_url, stream=True, config=self.app.config,
+-                                                auth=auth_info, **kwargs)
++                        response = real_requests.get(req_url, stream=True, auth=auth_info, **kwargs)
+                         response.raise_for_status()
+             except HTTPError as err:
+                 if err.response.status_code == 401:

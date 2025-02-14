@@ -1,0 +1,45 @@
+diff --git a/astropy/coordinates/builtin_frames/__init__.py b/astropy/coordinates/builtin_frames/__init__.py
+index 6fd688c285..171d613896 100644
+--- a/astropy/coordinates/builtin_frames/__init__.py
++++ b/astropy/coordinates/builtin_frames/__init__.py
+@@ -51,6 +51,7 @@ from . import icrs_observed_transforms
+ from . import intermediate_rotation_transforms
+ from . import ecliptic_transforms
+
++from . import itrs_observed_transforms
+ # Import this after importing other frames, since this requires various
+ # transformtions to set up the LSR frames
+ from .lsr import LSR, GalacticLSR, LSRK, LSRD
+diff --git a/astropy/coordinates/builtin_frames/itrs_observed_transforms.py b/astropy/coordinates/builtin_frames/itrs_observed_transforms.py
+new file mode 100644
+index 0000000000..4ba76e746f
+--- /dev/null
++++ b/astropy/coordinates/builtin_frames/itrs_observed_transforms.py
+@@ -0,0 +1 @@
++# Licensed under a 3-clause BSD style license - see LICENSE.rst\n\n\"\"\"\nDirect transforms between ITRS and the "observed" frames (AltAz, HADec).\nThis approach stays entirely within the ITRS and treats the ITRS position as time-invariant.\"\"\"\n\nimport numpy as np\nfrom astropy import units as u\nfrom astropy.coordinates.matrix_utilities import rotation_matrix, matrix_transpose\nfrom astropy.coordinates.transformations import FunctionTransformWithFiniteDifference\nfrom astropy.coordinates.baseframe import frame_transform_graph\n\nfrom .altaz import AltAz\nfrom .hadec import HADec\nfrom .itrs import ITRS\nfrom .utils import PIOVER2\n\ndef itrs_to_observed_mat(observed_frame):\n    lon, lat, height = observed_frame.location.to_geodetic('WGS84')\n    elong = lon.to_value(u.radian)\n\n    if isinstance(observed_frame, AltAz):\n        # form ITRS to AltAz matrix\n        elat = lat.to_value(u.radian)\n        # AltAz frame is left handed\n        minus_x = np.eye(3)\n        minus_x[0][0] = -1.0\n        mat = (minus_x\n               @ rotation_matrix(PIOVER2 - elat, 'y', unit=u.radian)\n               @ rotation_matrix(elong, 'z', unit=u.radian))\n    else:\n        # form ITRS to HADec matrix\n        # HADec frame is left handed\n        minus_y = np.eye(3)\n        minus_y[1][1] = -1.0\n        mat = (minus_y\n               @ rotation_matrix(elong, 'z', unit=u.radian))\n    return mat\n\n@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, ITRS, AltAz)\n@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, ITRS, HADec)\ndef itrs_to_observed(itrs_coo, observed_frame):\n    # form the Topocentric ITRS position\n    topocentric_itrs_repr = (itrs_coo.cartesian\n                             - observed_frame.location.get_itrs().cartesian)\n    rep = topocentric_itrs_repr.transform(itrs_to_observed_mat(observed_frame))\n    return observed_frame.realize_frame(rep)\n\n@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, AltAz, ITRS)\n@frame_transform_graph.transform(FunctionTransformWithFiniteDifference, HADec, ITRS)\ndef observed_to_itrs(observed_coo, itrs_frame):\n    # form the Topocentric ITRS position\n    topocentric_itrs_repr = observed_coo.cartesian.transform(matrix_transpose(\n                            itrs_to_observed_mat(observed_coo)))\n    # form the Geocentric ITRS position\n    rep = topocentric_itrs_repr + observed_coo.location.get_itrs().cartesian\n    return itrs_frame.realize_frame(rep)\n
+\ No newline at end of file
+diff --git a/bug_repro.py b/bug_repro.py
+new file mode 100644
+index 0000000000..83c00efa80
+--- /dev/null
++++ b/bug_repro.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python3
++from astropy.coordinates import EarthLocation, ITRS, AltAz
++from astropy.time import Time
++import astropy.units as u
++
++# Define a simple test to reproduce a direct ITRS to AltAz transform
++location = EarthLocation(lat=0*u.deg, lon=0*u.deg, height=0*u.m)
++t = Time('2023-01-01T00:00:00')
++
++# Define an ITRS coordinate at roughly Earth's surface at the equator
++c = ITRS(x=6371000*u.m, y=0*u.m, z=0*u.m, obstime=t)
++
++# Define the AltAz frame to transform into
++altaz_frame = AltAz(obstime=t, location=location)
++
++# Attempt the direct transform
++altaz = c.transform_to(altaz_frame)
++print(altaz)
+\ No newline at end of file

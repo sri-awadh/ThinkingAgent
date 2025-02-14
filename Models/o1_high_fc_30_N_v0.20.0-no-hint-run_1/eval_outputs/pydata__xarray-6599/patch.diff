@@ -1,0 +1,83 @@
+diff --git a/reproduce_polyval_issue.py b/reproduce_polyval_issue.py
+new file mode 100644
+index 00000000..90f21bc4
+--- /dev/null
++++ b/reproduce_polyval_issue.py
+@@ -0,0 +1,33 @@
++import xarray as xr
++import numpy as np
++
++values = np.array([
++    "2021-04-01T05:25:19.000000000",
++    "2021-04-01T05:25:29.000000000",
++    "2021-04-01T05:25:39.000000000",
++    "2021-04-01T05:25:49.000000000",
++    "2021-04-01T05:25:59.000000000",
++    "2021-04-01T05:26:09.000000000",
++], dtype="datetime64[ns]")
++
++azimuth_time = xr.DataArray(
++    values,
++    name="azimuth_time",
++    coords={"azimuth_time": values - values[0]},
++)
++
++polyfit_coefficients = xr.DataArray(
++    [
++        [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++        [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++        [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++        [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++        [4.44739216e6, 1.45053974e6, 5.29960857e6],
++    ],
++    dims=("degree", "axis"),
++    coords={"axis": [0, 1, 2], "degree": [4, 3, 2, 1, 0]},
++)
++
++print("Evaluating polynomial with xr.polyval, using timedelta64 coordinate")
++res = xr.polyval(azimuth_time, polyfit_coefficients)
++print(res)
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 823cbe02..9866bdee 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1914,7 +1914,18 @@ def polyval(
+         res *= coord
+         res += coeffs.isel({degree_dim: deg}, drop=True)
+
++    # Reorder dims if object has 'dims' attribute (like a DataArray) and is not a Dataset
++    if hasattr(coord, 'dims') and not hasattr(coord, 'data_vars'):
++        new_order = list(coord.dims) + [d for d in res.dims if d not in coord.dims]
++        res = res.transpose(*new_order)
++
+     return res
++    # Ensure that if coord is a DataArray, the coordinate dims appear first in the result
++    if isinstance(coord, DataArray):
++        # Put coord’s dims first, then any remaining dims
++        new_order = list(coord.dims) + [d for d in res.dims if d not in coord.dims]
++        res = res.transpose(*new_order)
++
+
+
+ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+@@ -1933,11 +1944,18 @@ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+     from .dataset import Dataset
+
+     def to_floatable(x: DataArray) -> DataArray:
+-        if x.dtype.kind in "mM":
++        if x.dtype.kind == "m":
++            # For timedeltas, just cast to float64 (relative times remain as-is)
++            return x.copy(
++                data=x.data.astype('float64')
++            )
++        elif x.dtype.kind == "M":
++            # For datetimes, use the minimum as offset to keep results consistent.
++            min_x = x.data.min()
+             return x.copy(
+                 data=datetime_to_numeric(
+                     x.data,
+-                    offset=np.datetime64("1970-01-01"),
++                    offset=min_x,
+                     datetime_unit="ns",
+                 ),
+             )

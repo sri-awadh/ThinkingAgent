@@ -1,0 +1,94 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 5c78c6e315..d45b1a8324 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -982,13 +982,20 @@ class QuerySet:
+         """
+         Update all elements in the current QuerySet, setting all the given
+         fields to the appropriate values.
++        This fix filters out fields that don't belong to the current model
++        (e.g., second parent fields in multi-table inheritance).
+         """
+         self._not_support_combined_queries("update")
+         if self.query.is_sliced:
+             raise TypeError("Cannot update a query once a slice has been taken.")
+         self._for_write = True
+         query = self.query.chain(sql.UpdateQuery)
+-        query.add_update_values(kwargs)
++        valid_fields = {f.name for f in self.model._meta.concrete_fields}
++        filtered_kwargs = {}
++        for field_name, val in kwargs.items():
++            if field_name in valid_fields:
++                filtered_kwargs[field_name] = val
++        query.add_update_values(filtered_kwargs)
+         # Clear any annotations so that they won't be present in subqueries.
+         query.annotations = {}
+         with transaction.mark_for_rollback_on_error(using=self.db):
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..b49fce377b
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,61 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Minimal settings for Django:
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++settings.configure(
++    INSTALLED_APPS=['__main__'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    SECRET_KEY='testsecretkey',
++)
++settings.MIGRATION_MODULES = {"__main__": None}
++django.setup()
++from django.core.management import call_command
++call_command("migrate", run_syncdb=True)
++class Meta:
++    app_label = '__main__'
++
++class Base(models.Model):
++    base_id = models.AutoField(primary_key=True)
++    field_base = models.IntegerField()
++    class Meta:
++        app_label = '__main__'
++
++class OtherBase(models.Model):
++    otherbase_id = models.AutoField(primary_key=True)
++    field_otherbase = models.IntegerField()
++    class Meta:
++        app_label = '__main__'
++
++class Child(Base, OtherBase):
++    pass
++
++def main():
++    django.setup()
++    # Create initial data
++    OtherBase.objects.create(field_otherbase=100)
++    OtherBase.objects.create(field_otherbase=101)
++
++    Child.objects.create(field_base=0, field_otherbase=0)
++    Child.objects.create(field_base=1, field_otherbase=1)
++
++    # Update this triggers the issue
++    updated_count = Child.objects.update(field_otherbase=55)
++    print("Updated count:", updated_count)
++
++    # Show child objects
++    print("Child .values('field_otherbase'):", list(Child.objects.values('field_otherbase')))
++
++    # Show other base
++    print("OtherBase .values('field_otherbase'):", list(OtherBase.objects.values('field_otherbase')))
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file

@@ -1,0 +1,119 @@
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index 61f88401ab..6357284a9b 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -408,6 +408,11 @@ class BaseDatabaseSchemaEditor:
+             **constraint_kwargs
+         )
+         if len(constraint_names) != 1:
++            if constraint_kwargs.get('index') is True:
++                cands = [n for n in constraint_names if n.endswith('_idx')]
++                if len(cands) == 1:
++                    self.execute(self._delete_constraint_sql(sql, model, cands[0]))
++                    return
+             raise ValueError("Found wrong number (%s) of constraints for %s(%s)" % (
+                 len(constraint_names),
+                 model._meta.db_table,
+diff --git a/test_repro.py b/test_repro.py
+new file mode 100644
+index 0000000000..41fd0b26e9
+--- /dev/null
++++ b/test_repro.py
+@@ -0,0 +1,68 @@
++import django
++from django.conf import settings
++import sys
++
++
++def main():
++    # Minimal Django settings
++    settings.configure(
++        INSTALLED_APPS=["test_repro_app.apps.TestReproAppConfig"],
++        MIGRATION_MODULES={"test_repro_app": None},
++        DATABASES={"default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": ":memory:",
++        }},
++        SECRET_KEY="secret",
++    )
++    django.setup()
++
++    from django.db import migrations, models, connection
++    from django.db.migrations.executor import MigrationExecutor
++
++    def do_migration(migration_list):
++        executor = MigrationExecutor(connection)
++        project_state = executor.loader.project_state()
++        for migration in migration_list:
++            with connection.schema_editor() as editor:
++                project_state = migration.apply(project_state, editor)
++
++    class MigrationCreate(migrations.Migration):
++        app_label = "test_repro_app"
++        initial = True
++        dependencies = []
++        operations = [
++            migrations.CreateModel(
++                name="MyModel",
++                fields=[
++                    ("id", models.AutoField(primary_key=True)),
++                    ("field1", models.CharField(max_length=20)),
++                    ("field2", models.CharField(max_length=20)),
++                ],
++                options={
++                    "unique_together": {("field1", "field2")},
++                    "index_together": {("field1", "field2")},
++                },
++            )
++        ]
++
++    class MigrationRemoveIndex(migrations.Migration):
++        dependencies = [("test_repro_app", "0001_initial")]
++        operations = [
++            migrations.AlterIndexTogether(
++                name="MyModel",
++                index_together=set(),
++            ),
++        ]
++
++    # Apply initial migration with unique_together and index_together
++    do_migration([MigrationCreate("0001_initial", "test_repro_app")])
++    print("Migration 0001 applied OK. Now removing index_together.")
++
++    # Attempt to remove index_together only
++    do_migration([MigrationRemoveIndex("0002_remove_index", "test_repro_app")])
++    print("Migration 0002 applied OK. This means the error did not occur.")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_repro_app/__init__.py b/test_repro_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_repro_app/apps.py b/test_repro_app/apps.py
+new file mode 100644
+index 0000000000..476dd715bc
+--- /dev/null
++++ b/test_repro_app/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++
++class TestReproAppConfig(AppConfig):
++    name = 'test_repro_app'
+\ No newline at end of file
+diff --git a/test_repro_app/models.py b/test_repro_app/models.py
+new file mode 100644
+index 0000000000..c178d9d6ca
+--- /dev/null
++++ b/test_repro_app/models.py
+@@ -0,0 +1,8 @@
++from django.db import models
++
++class MyModel(models.Model):
++    field1 = models.CharField(max_length=20)
++    field2 = models.CharField(max_length=20)
++
++    class Meta:
++        app_label = 'test_repro_app'
+\ No newline at end of file

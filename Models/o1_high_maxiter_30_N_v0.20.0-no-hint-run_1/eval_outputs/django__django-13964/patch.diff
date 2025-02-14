@@ -1,0 +1,73 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 2428218696..8eb752597b 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -784,9 +784,11 @@ class Model(metaclass=ModelBase):
+         inserted = False
+         for parent, field in meta.parents.items():
+             # Make sure the link fields are synced between parent and self.
+-            if (field and getattr(self, parent._meta.pk.attname) is None and
+-                    getattr(self, field.attname) is not None):
+-                setattr(self, parent._meta.pk.attname, getattr(self, field.attname))
++            if field:
++                child_pk = getattr(self, parent._meta.pk.attname)
++                parent_val = getattr(self, field.attname)
++                if (child_pk in (None, '')) and (parent_val not in (None, '')):
++                    setattr(self, parent._meta.pk.attname, parent_val)
+             parent_inserted = self._save_parents(cls=parent, using=using, update_fields=update_fields)
+             updated = self._save_table(
+                 cls=parent, using=using, update_fields=update_fields,
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..f8ff70ff6b
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,47 @@
++import sys
++import django
++from django.conf import settings
++from django.db import models, transaction
++from django.core.management import call_command
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=['__main__'],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        SECRET_KEY='xyz123',
++    )
++
++
++django.setup()
++
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++
++    class Meta:
++        app_label = 'repro'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++
++def main():
++    call_command('makemigrations', interactive=False, verbosity=1)
++    call_command('migrate', run_syncdb=True, interactive=False, verbosity=1)
++    with transaction.atomic():
++        order = Order()
++        order.product = Product()
++        order.product.sku = "foo"
++        order.product.save()
++        order.save()
++        # If the bug remains, product_id will be "" instead of "foo".
++        if Order.objects.filter(product_id="").exists():
++            print("BUG REPRODUCED: product_id is empty string, not 'foo'.")
++        else:
++            print("No bug found. Possibly already fixed.")
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file

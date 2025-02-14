@@ -1,0 +1,74 @@
+diff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py
+index 97977d72ef..bf9c2acd26 100644
+--- a/django/db/migrations/autodetector.py
++++ b/django/db/migrations/autodetector.py
+@@ -96,7 +96,7 @@ class MigrationAutodetector:
+         for name, field in sorted(fields.items()):
+             deconstruction = self.deep_deconstruct(field)
+             if field.remote_field and field.remote_field.model:
+-                del deconstruction[2]['to']
++                deconstruction[2].pop('to', None)
+             fields_def.append(deconstruction)
+         return fields_def
+
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..908b30bf2e
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,55 @@
++import sys
++import django
++from django.conf import settings
++
++# Minimal script to reproduce the KeyError described in the PR.
++# The fix is to change 'del deconstruction[2]["to"]' to 'deconstruction[2].pop("to", None)' in
++# django/db/migrations/autodetector.py.
++# We expect a KeyError if the fix is not applied.
++
++def run():
++    settings.configure(
++        INSTALLED_APPS=[],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++    )
++    django.setup()
++
++    from django.db import models
++    from django.db.migrations.autodetector import MigrationAutodetector
++    from django.db.migrations.state import ModelState, ProjectState
++
++    class CustomFKField(models.ForeignKey):
++        def __init__(self, *args, **kwargs):
++            kwargs['to'] = 'testapp.HardcodedModel'
++            super().__init__(*args, **kwargs)
++        def deconstruct(self):
++            name, path, args, kwargs = super().deconstruct()
++            del kwargs["to"]  # This triggers KeyError in the autodetector if it tries to del as well.
++            return name, path, args, kwargs
++
++    before = ProjectState()
++    before.add_model(ModelState('testapp', 'HardcodedModel', []))
++    after = ProjectState()
++    after.add_model(ModelState('testapp', 'HardcodedModel', []))
++    after.add_model(ModelState('testapp', 'TestModel', [
++        ('custom', CustomFKField(on_delete=models.CASCADE))
++    ]))
++    print("Running autodetector...")
++    changes = MigrationAutodetector(before, after)._detect_changes()
++    print("Autodetector changes:", changes)
++
++
++def main():
++    try:
++        run()
++        print("No KeyError encountered. If this is a fresh clone, the fix might be already applied, or something else is amiss.")
++    except KeyError as e:
++        print("KeyError encountered, as expected for unpatched code:", e)
++
++if __name__ == "__main__":
++    main()

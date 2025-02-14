@@ -1,0 +1,69 @@
+diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py
+index acee9887d2..bdeec80610 100644
+--- a/django/conf/global_settings.py
++++ b/django/conf/global_settings.py
+@@ -304,7 +304,7 @@ FILE_UPLOAD_TEMP_DIR = None
+
+ # The numeric mode to set newly-uploaded files to. The value should be a mode
+ # you'd pass directly to os.chmod; see https://docs.python.org/library/os.html#files-and-directories.
+-FILE_UPLOAD_PERMISSIONS = None
++FILE_UPLOAD_PERMISSIONS = 0o644
+
+ # The numeric mode to assign to newly-created directories, when uploading files.
+ # The value should be a mode as you'd pass to os.chmod;
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..1a74886256
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,49 @@
++import os
++import tempfile
++from django.conf import settings
++from django.core.files.storage import FileSystemStorage
++from django.core.files.uploadedfile import TemporaryUploadedFile
++
++# This script tries to reproduce the scenario described in the PR description:
++# The issue that uploaded files end up with 0o600 (rw-------) permissions if not explicitly set with FILE_UPLOAD_PERMISSIONS.
++
++# Use a test directory
++UPLOAD_ROOT = os.path.join(tempfile.gettempdir(), "django_file_upload_test")
++os.makedirs(UPLOAD_ROOT, exist_ok=True)
++
++# Configure Django settings minimally for this test
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY="test",
++    FILE_UPLOAD_HANDLERS=[
++        "django.core.files.uploadhandler.TemporaryFileUploadHandler",
++        "django.core.files.uploadhandler.MemoryFileUploadHandler",
++    ],
++    FILE_UPLOAD_MAX_MEMORY_SIZE=1,  # something small to force usage of temporary files
++    MEDIA_ROOT=UPLOAD_ROOT,
++    DEFAULT_FILE_STORAGE="django.core.files.storage.FileSystemStorage",
++)
++
++def test_file_permissions():
++    # Let's try writing a file that is big enough to trigger temp file usage
++    fs = FileSystemStorage(location=UPLOAD_ROOT)
++    big_data = b"x" * 2  # small, but over the limit set above to ensure we use TemporaryUploadedFile
++    temp_file = TemporaryUploadedFile(
++        name="testfile.txt",
++        content_type="text/plain",
++        size=len(big_data),
++        charset="utf-8"
++    )
++    temp_file.write(big_data)
++    temp_file.seek(0)
++
++    saved_path = fs.save("testfile.txt", temp_file)
++    final_location = os.path.join(UPLOAD_ROOT, saved_path)
++    # Check the file permission
++    perm = oct(os.stat(final_location).st_mode)[-3:]
++    print("Permissions for saved file: ", perm)
++    return perm
++
++if __name__ == "__main__":
++    result = test_file_permissions()
++    print("Resulting permission bits (octal):", result)
+\ No newline at end of file

@@ -1,0 +1,154 @@
+diff --git a/django/core/management/commands/inspectdb.py b/django/core/management/commands/inspectdb.py
+index f9b4bfb477..ea1c492257 100644
+--- a/django/core/management/commands/inspectdb.py
++++ b/django/core/management/commands/inspectdb.py
+@@ -79,6 +79,23 @@ class Command(BaseCommand):
+                     except NotImplementedError:
+                         constraints = {}
+                     primary_key_column = connection.introspection.get_primary_key_column(cursor, table_name)
++                    # Manually populate 'relations' with foreign_key references pointing to non-PK columns.
++                    for cname, cinfo in constraints.items():
++                        if cinfo.get('foreign_key'):
++                            rtable, rcol = cinfo['foreign_key']
++                            for local_col in cinfo['columns']:
++                                relations[local_col] = (rcol, rtable)
++        # Force Django to treat non-PK foreign key references as relations.
++        # This ensures that fields referencing non-primary unique columns become ForeignKeys.
++        for ckey, cinfo in constraints.items():
++            if cinfo.get('foreign_key'):
++                ref_table, ref_col = cinfo['foreign_key']
++                for col in cinfo['columns']:
++                    if col not in relations:
++                        # The first item of the tuple is an index (integer) for ordering,
++                        # we can safely store 0 or None, as we only need the second item for the table name
++                        relations[col] = (0, ref_table)
++
+                     unique_columns = [
+                         c['columns'][0] for c in constraints.values()
+                         if c['unique'] and len(c['columns']) == 1
+@@ -101,7 +118,37 @@ class Command(BaseCommand):
+                     column_name = row.name
+                     is_relation = column_name in relations
+
++                        if not is_relation:
++if not is_relation:
++    for cinfo in constraints.values():
++        if cinfo.get('foreign_key') and column_name in cinfo['columns']:
++            remote_table, remote_col = cinfo['foreign_key']
++            relations[column_name] = (None, remote_table)
++            is_relation = True
++            break
++
++                            for cinfo in constraints.values():
++                        # Minimal fix: Always set to_field if the local field references a non-PK.
++                        remote_col = relations[column_name][0]
++                        remote_table = relations[column_name][1]
++                        remote_pk = connection.introspection.get_primary_key_column(cursor, remote_table)
++                        if remote_col != remote_pk:
++                            extra_params['to_field'] = remote_col
++
++                                if cinfo.get('foreign_key') and column_name in cinfo['columns']:
++                                    remote_table, remote_col = cinfo['foreign_key']
++                                    relations[column_name] = (None, remote_table)
++                                    is_relation = True
++                                    break
++
+                     att_name, params, notes = self.normalize_col_name(
++        if not is_relation:
++            for cinfo in constraints.values():
++                if cinfo.get('foreign_key') and column_name in cinfo['columns']:
++                    remote_table, remote_col = cinfo['foreign_key']
++                    relations[column_name] = (0, remote_table)
++                    is_relation = True
++                    break
+                         column_name, used_column_names, is_relation)
+                     extra_params.update(params)
+                     comment_notes.extend(notes)
+@@ -128,6 +175,14 @@ class Command(BaseCommand):
+                             field_type = '%s(%s' % (rel_type, rel_to)
+                         else:
+                             field_type = "%s('%s'" % (rel_type, rel_to)
++                    remote_table = relations[column_name][1]
++                    remote_pk = connection.introspection.get_primary_key_column(cursor, remote_table)
++                    for cname, cinfo in constraints.items():
++                        if cinfo.get('foreign_key') and column_name in cinfo['columns']:
++                            ref_table, ref_col = cinfo['foreign_key']
++                            if ref_table == remote_table and ref_col != remote_pk:
++                                extra_params['to_field'] = ref_col
++                                break
+                     else:
+                         # Calling `get_field_type` to get the field type string and any
+                         # additional parameters and notes.
+diff --git a/django/db/backends/sqlite3/introspection.py b/django/db/backends/sqlite3/introspection.py
+index ce097dbd72..5073af505f 100644
+--- a/django/db/backends/sqlite3/introspection.py
++++ b/django/db/backends/sqlite3/introspection.py
+@@ -137,6 +137,16 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
+         # to create the table we can look for REFERENCES statements used there.
+         for field_desc in results.split(','):
+             field_desc = field_desc.strip()
++            # Handle constraints that start with "constraint <name> foreign key"
++            if field_desc.lower().startswith("constraint") and "foreign key" in field_desc.lower():
++                m2 = re.search(r'foreign key\s*\(([^)]+)\)\s*references\s+(\S+)\s*\(\s*([^)]+)\s*\)', field_desc, re.IGNORECASE)
++                if m2:
++                    fk_field, fk_table, fk_column = m2.groups()
++                    fk_field = fk_field.strip('"').strip()
++                    fk_table = fk_table.strip('"').strip()
++                    fk_column = fk_column.strip('"').strip()
++                    relations[fk_field] = (fk_column, fk_table)
++                    continue
+             if field_desc.startswith("UNIQUE"):
+                 continue
+
+diff --git a/repro/reproduce_error.py b/repro/reproduce_error.py
+new file mode 100644
+index 0000000000..32adfaee46
+--- /dev/null
++++ b/repro/reproduce_error.py
+@@ -0,0 +1,46 @@
++import django
++from django.conf import settings
++from django.core.management import call_command
++from django.db import connection
++from io import StringIO
++import sys
++
++def main():
++    # Configure minimal Django settings.
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='secret-key-for-testing',
++    )
++
++    django.setup()
++
++    # Create the tables that will reproduce the issue.
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE foo (id integer primary key autoincrement, other_id int UNIQUE);")
++        cursor.execute("CREATE TABLE bar (id integer primary key autoincrement, other_id int, constraint myconst FOREIGN KEY(other_id) references foo(other_id));")
++
++    # Now run inspectdb and capture its output.
++    out = StringIO()
++    call_command('inspectdb', database='default', stdout=out)
++    inspected = out.getvalue()
++
++    print("=== INSPECTDB OUTPUT ===")
++    print(inspected)
++
++    if "ForeignKey(" in inspected and "to_field" in inspected:
++        print("SUCCESS: Foreign key to specific field found in output!")
++    else:
++        print("NOTICE: No 'to_field' reference found in foreign key.")
++
++if __name__ == "__main__":
++    main()

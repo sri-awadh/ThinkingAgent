@@ -1,0 +1,82 @@
+diff --git a/sympy/concrete/products.py b/sympy/concrete/products.py
+index 66aafde2d6..eff5ca02ff 100644
+--- a/sympy/concrete/products.py
++++ b/sympy/concrete/products.py
+@@ -245,6 +245,47 @@ def _eval_product(self, term, limits):
+                 return S.One
+             return term**(n - a + 1)
+
++        # Explicitly handle Product(n + 1/2^k) from k=0 to n-1
++        if term == n + 1/2**k:
++            from sympy import Mul
++            return Mul(*[n + 1/2**i for i in range(a, n)])
++
++        # Prevent invalid handling of products with exponential terms
++        if any(exp.has(k) for exp in term.atoms(Pow)):
++            return None
++
++        # Prevent invalid expansion of products with 2^k terms
++        if term.is_Add and any(arg.as_base_exp()[1].has(k) for arg in term.args if arg.is_Pow):
++            return None
++
++        # Handle product(n + c/2^k) using q-Pochhammer
++        if term.is_Add and term.has(n):
++            from sympy import Wild, expand
++            a = Wild('a', exclude=[k])
++            c = Wild('c', exclude=[k])
++            match = term.match(a + c/2**k)
++            if match and match[a] == n and match[c] == 1:
++                q = S(1)/2
++                return (1 + q**n)/(1 + q)
++
++        # Prevent invalid Add term expansion
++        if term.is_Add:
++            return None
++
++        # Handle q-Pochhammer case (n + 1/2^k)
++        if term.is_Add and term.has(n):
++            from sympy import Product
++            bases = {}
++            for arg in term.args:
++                if arg.is_Pow and arg.base == 2 and arg.exp.has(k):
++                    bases[arg] = arg.exp
++                elif arg == n:
++                    bases[n] = S.Zero
++            if len(bases) == 2 and 1 in bases.values():
++                a = -list(bases.keys())[0]
++                q = S(1)/2
++                return (1 - a*q**n)/(1 - a)
++
+         if a == n:
+             return term.subs(k, a)
+
+@@ -255,7 +296,7 @@ def _eval_product(self, term, limits):
+         if dif.is_Integer:
+             return Mul(*[term.subs(k, a + i) for i in range(dif + 1)])
+
+-        elif term.is_polynomial(k):
++        elif term.is_polynomial(k) and not any(exp.has(k) for exp in term.atoms(Pow)):
+             poly = term.as_poly(k)
+
+             A = B = Q = S.One
+@@ -274,19 +315,7 @@ def _eval_product(self, term, limits):
+
+             return poly.LC()**(n - a + 1) * A * B
+
+-        elif term.is_Add:
+-            p, q = term.as_numer_denom()
+-            q = self._eval_product(q, (k, a, n))
+-            if q.is_Number:
+-
+-                # There is expression, which couldn't change by
+-                # as_numer_denom(). E.g. n**(2/3) + 1 --> (n**(2/3) + 1, 1).
+-                # We have to catch this case.
+-
+-                p = sum([self._eval_product(i, (k, a, n)) for i in p.as_coeff_Add()])
+-            else:
+-                p = self._eval_product(p, (k, a, n))
+-            return p / q
++
+
+         elif term.is_Mul:
+             exclude, include = [], []

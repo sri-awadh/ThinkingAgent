@@ -1,0 +1,75 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..c89789bdc4 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -232,8 +232,12 @@ class Collector:
+         """
+         Get a QuerySet of objects related to `objs` via the relation `related`.
+         """
+-        return related.related_model._base_manager.using(self.using).filter(
+-            **{"%s__in" % related.field.name: objs}
++        model = related.related_model
++        fields_to_select = {model._meta.pk.name, related.field.attname}
++        return (
++            model._base_manager.using(self.using)
++            .filter(**{"%s__in" % related.field.name: objs})
++            .only(*fields_to_select)
+         )
+
+     def instances_with_model(self):
+diff --git a/scripts/reproduce_error.py b/scripts/reproduce_error.py
+new file mode 100644
+index 0000000000..f25aa9f4e4
+--- /dev/null
++++ b/scripts/reproduce_error.py
+@@ -0,0 +1,50 @@
++import os, django
++from django.conf import settings
++from django.db import models
++
++# Minimal Django setup so we can attempt to reproduce the behavior.
++# Depending on the database backend, it might not fully replicate the original error
++# but it serves as a demonstration of how we would run a .delete() that fetches unneeded fields.
++
++def main():
++    # Configure Django settings with an in-memory sqlite DB
++    settings.configure(
++        INSTALLED_APPS=['__main__'],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        SECRET_KEY='test'
++    )
++    django.setup()
++
++    class JunkDataModel(models.Model):
++        # This field can contain invalid bytes when stored in a MySQL db with certain encodings.
++        line = models.TextField()
++
++    # Create the tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(JunkDataModel)
++
++    # Insert a row that might be invalid under certain MySQL encodings.
++    # This is a simulation.
++    # For example, store a raw 0xed byte by decoding it as latin-1.
++    # In an actual MySQL instance with use_unicode=True, fetching this might cause a decode error.
++
++    raw_data = b'\xed'  # 0xed is an invalid start for UTF-8.
++
++    obj = JunkDataModel.objects.create(line=raw_data.decode('latin-1'))
++    print(f"Created object with ID={obj.id} and line with length={len(obj.line)}")
++
++    # Try a .delete() which will fetch field data in older Django versions.
++    # We want to see if an error like UnicodeDecodeError occurs.
++
++    print("Starting delete...")
++    JunkDataModel.objects.all().delete()
++    print("Delete completed successfully!")
++
++if __name__ == '__main__':
++    main()

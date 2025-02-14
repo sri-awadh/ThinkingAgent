@@ -1,0 +1,88 @@
+diff --git a/django/urls/resolvers.py b/django/urls/resolvers.py
+index 9b00e24509..1a07059c9c 100644
+--- a/django/urls/resolvers.py
++++ b/django/urls/resolvers.py
+@@ -45,12 +45,23 @@ class ResolverMatch:
+         self.namespaces = [x for x in namespaces if x] if namespaces else []
+         self.namespace = ':'.join(self.namespaces)
+
+-        if not hasattr(func, '__name__'):
++        if isinstance(func, functools.partial):
++            self._func_is_partial = True
++            self._func_partial_args = func.args
++            self._func_partial_kwargs = func.keywords
++            underlying_func = func.func
++        else:
++            self._func_is_partial = False
++            self._func_partial_args = None
++            self._func_partial_kwargs = None
++            underlying_func = func
++
++        if not hasattr(underlying_func, '__name__'):
+             # A class-based view
+-            self._func_path = func.__class__.__module__ + '.' + func.__class__.__name__
++            self._func_path = underlying_func.__class__.__module__ + '.' + underlying_func.__class__.__name__
+         else:
+             # A function-based view
+-            self._func_path = func.__module__ + '.' + func.__name__
++            self._func_path = underlying_func.__module__ + '.' + underlying_func.__name__
+
+         view_path = url_name or self._func_path
+         self.view_name = ':'.join(self.namespaces + [view_path])
+@@ -59,8 +70,14 @@ class ResolverMatch:
+         return (self.func, self.args, self.kwargs)[index]
+
+     def __repr__(self):
++        if self._func_is_partial:
++            func_str = "functools.partial(%s, args=%s, kwargs=%s)" % (
++                self._func_path, self._func_partial_args, self._func_partial_kwargs
++            )
++        else:
++            func_str = self._func_path
+         return "ResolverMatch(func=%s, args=%s, kwargs=%s, url_name=%s, app_names=%s, namespaces=%s, route=%s)" % (
+-            self._func_path, self.args, self.kwargs, self.url_name,
++            func_str, self.args, self.kwargs, self.url_name,
+             self.app_names, self.namespaces, self.route,
+         )
+
+diff --git a/scripts/repro_partial_bug.py b/scripts/repro_partial_bug.py
+new file mode 100644
+index 0000000000..5b4a998959
+--- /dev/null
++++ b/scripts/repro_partial_bug.py
+@@ -0,0 +1,19 @@
++import functools
++from django.urls.resolvers import ResolverMatch
++
++# A dummy view function.
++def dummy_view(a, b=0):
++    return a + b
++
++# We create a partial function with a pre-supplied argument.
++partial_view = functools.partial(dummy_view, 10)
++
++# Generate a ResolverMatch object with this partial view.
++# The route provides another arg.
++match = ResolverMatch(partial_view, (5,), {})
++
++# Print it out to see how the partial is represented.
++# Before the fix, you should see something like 'func=functools.partial'
++# which is not helpful.
++# After applying the fix we plan, it should reveal the underlying function plus partial args.
++print(match)
+\ No newline at end of file
+diff --git a/scripts/test_resolvermatch_partial.py b/scripts/test_resolvermatch_partial.py
+new file mode 100644
+index 0000000000..c45ee15b73
+--- /dev/null
++++ b/scripts/test_resolvermatch_partial.py
+@@ -0,0 +1,9 @@
++from django.urls.resolvers import ResolverMatch
++import functools
++
++def dummy(a):
++    pass
++
++partialview = functools.partial(dummy, 1)
++rm = ResolverMatch(partialview, (), {})
++print(rm)

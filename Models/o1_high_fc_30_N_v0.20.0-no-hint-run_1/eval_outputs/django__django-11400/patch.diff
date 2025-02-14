@@ -1,0 +1,158 @@
+diff --git a/django/contrib/admin/filters.py b/django/contrib/admin/filters.py
+index d65e01d5e2..f6710f7e68 100644
+--- a/django/contrib/admin/filters.py
++++ b/django/contrib/admin/filters.py
+@@ -198,6 +198,8 @@ class RelatedFieldListFilter(FieldListFilter):
+         related_admin = model_admin.admin_site._registry.get(field.remote_field.model)
+         if related_admin is not None:
+             ordering = related_admin.get_ordering(request)
++        if not ordering:
++            ordering = field.remote_field.model._meta.ordering or ()
+         return field.get_choices(include_blank=False, ordering=ordering)
+
+     def choices(self, changelist):
+@@ -419,4 +421,10 @@ FieldListFilter.register(lambda f: True, AllValuesFieldListFilter)
+ class RelatedOnlyFieldListFilter(RelatedFieldListFilter):
+     def field_choices(self, field, request, model_admin):
+         pk_qs = model_admin.get_queryset(request).distinct().values_list('%s__pk' % self.field_path, flat=True)
+-        return field.get_choices(include_blank=False, limit_choices_to={'pk__in': pk_qs})
++        ordering = ()
++        related_admin = model_admin.admin_site._registry.get(field.remote_field.model)
++        if related_admin is not None:
++            ordering = related_admin.get_ordering(request)
++        if not ordering:
++            ordering = field.remote_field.model._meta.ordering or ()
++        return field.get_choices(include_blank=False, limit_choices_to={'pk__in': pk_qs}, ordering=ordering)
+diff --git a/repro/__init__.py b/repro/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/repro/admin.py b/repro/admin.py
+new file mode 100644
+index 0000000000..8e2cdaf778
+--- /dev/null
++++ b/repro/admin.py
+@@ -0,0 +1,10 @@
++from django.contrib import admin
++from .models import Author, Book
++
++@admin.register(Author)
++class AuthorAdmin(admin.ModelAdmin):
++    pass
++
++@admin.register(Book)
++class BookAdmin(admin.ModelAdmin):
++    list_filter = ('author',)
+diff --git a/repro/apps.py b/repro/apps.py
+new file mode 100644
+index 0000000000..1cd625d63f
+--- /dev/null
++++ b/repro/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++
++class ReproConfig(AppConfig):
++    name = 'repro'
+\ No newline at end of file
+diff --git a/repro/models.py b/repro/models.py
+new file mode 100644
+index 0000000000..81816c3e9f
+--- /dev/null
++++ b/repro/models.py
+@@ -0,0 +1,11 @@
++from django.db import models
++
++class Author(models.Model):
++    name = models.CharField(max_length=50)
++
++    class Meta:
++        ordering = ['name']
++
++class Book(models.Model):
++    title = models.CharField(max_length=50)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+diff --git a/scripts/repro.py b/scripts/repro.py
+new file mode 100644
+index 0000000000..fca8ab9a40
+--- /dev/null
++++ b/scripts/repro.py
+@@ -0,0 +1,79 @@
++import os
++import sys
++
++import sys
++sys.path.insert(0, "/workspace/django__django__3.0")
++
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='secretkey',
++        ALLOWED_HOSTS=['*'],
++        ROOT_URLCONF=__name__,
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++        ],
++    )
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.http import HttpRequest
++from django.core.management import call_command
++
++from repro.models import Author, Book
++import repro.admin
++
++
++
++
++def test_filter_ordering():
++    Author.objects.all().delete()
++    Book.objects.all().delete()
++
++    Author.objects.create(name='John')
++    Author.objects.create(name='Amy')
++    Author.objects.create(name='Zoe')
++
++    request = HttpRequest()
++    request.user = None
++
++    # Prepare a changelist for Book
++    # use the get_changelist_instance (Django 2.1+)
++    ma = admin.site._registry[Book]
++    ChangeList = ma.get_changelist_instance(request)
++    # The filter specs are in ChangeList.filter_specs
++    filter_spec = ChangeList.filter_specs[0]
++
++    # The field choices for the first filter (author)
++    choices_data = filter_spec.lookup_choices
++    # The second element in each tuple is the display name
++    names = [val for _pk, val in choices_data]
++
++    # We expect them to be sorted by author.name if the fix is in place
++    if names == sorted(names):
++        print("PASS: The authors are ordered by the model's Meta.ordering.")
++    else:
++        print("FAIL: The authors are NOT ordered by the model's Meta.ordering.\n     Found order: ", names)
++
++if __name__ == '__main__':
++    call_command('migrate', verbosity=0)
++    test_filter_ordering()
+\ No newline at end of file

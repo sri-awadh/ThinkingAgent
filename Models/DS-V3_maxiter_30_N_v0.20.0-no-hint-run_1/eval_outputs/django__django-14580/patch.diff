@@ -1,0 +1,76 @@
+diff --git a/django/db/migrations/writer.py b/django/db/migrations/writer.py
+index 4918261fb0..b0e5f7f907 100644
+--- a/django/db/migrations/writer.py
++++ b/django/db/migrations/writer.py
+@@ -162,9 +162,16 @@ class MigrationWriter:
+                 imports.remove(line)
+                 self.needs_manual_porting = True
+
++        # Check if we need models import by looking for model inheritance
++        needs_models = False
++        for operation in self.migration.operations:
++            if hasattr(operation, 'bases') and operation.bases:
++                needs_models = True
++                break
++
+         # django.db.migrations is always used, but models import may not be.
+-        # If models import exists, merge it with migrations import.
+-        if "from django.db import models" in imports:
++        # If models import exists or is needed for inheritance, merge it with migrations import
++        if "from django.db import models" in imports or needs_models:
+             imports.discard("from django.db import models")
+             imports.add("from django.db import migrations, models")
+         else:
+diff --git a/tests/migrations/test_writer_fix.py b/tests/migrations/test_writer_fix.py
+new file mode 100644
+index 0000000000..71a6e13995
+--- /dev/null
++++ b/tests/migrations/test_writer_fix.py
+@@ -0,0 +1,46 @@
++import os
++os.environ['DJANGO_SETTINGS_MODULE'] = 'django.conf.global_settings'
++
++from django.db import migrations, models
++from django.test import TestCase, override_settings
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++)
++
++class TestMigration(Migration):
++    initial = True
++    dependencies = []
++    operations = [
++        migrations.CreateModel(
++            name='MyModel',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++            ],
++            bases=(models.Model,),
++        ),
++    ]
++
++class MigrationWriterTests(TestCase):
++    def test_model_inheritance_import(self):
++        migration = TestMigration('test_migration', 'test_app')
++        writer = MigrationWriter(migration)
++        content = writer.as_string()
++
++        # Verify models import is present
++        self.assertIn('from django.db import migrations, models', content)
++
++        # Verify the migration content is valid
++        try:
++            exec(content, {})
++        except Exception as e:
++            self.fail(f'Generated migration code is invalid: {e}')
+\ No newline at end of file

@@ -1,0 +1,119 @@
+diff --git a/src/_pytest/skipping.py b/src/_pytest/skipping.py
+index 335e10996..31e7d2df5 100644
+--- a/src/_pytest/skipping.py
++++ b/src/_pytest/skipping.py
+@@ -238,30 +238,44 @@ def pytest_runtest_setup(item: Item) -> None:
+         item._store[skipped_by_mark_key] = True
+         skip(skipped.reason)
+
++    # Always re-evaluate xfail markers before test setup
++    item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+     if not item.config.option.runxfail:
+-        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+         if xfailed and not xfailed.run:
+             xfail("[NOTRUN] " + xfailed.reason)
++        # If there's an xfail marker, set the expected failure state
++        elif xfailed:
++            item._expected_failure = True
++            # Mark the test as expected to fail
++            item._store[xfailed_key] = xfailed
++            item._expected_failure_reason = xfailed.reason
++            # If we're in the call phase, mark as xfail immediately
++            if hasattr(item, '_request') and item._request.node == item:
++                xfail(xfailed.reason)
+
+
+ @hookimpl(hookwrapper=True)
+ def pytest_runtest_call(item: Item) -> Generator[None, None, None]:
+-    xfailed = item._store.get(xfailed_key, None)
+-    if xfailed is None:
+-        item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+-
++    # Evaluate xfail markers before test execution
++    item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
++
+     if not item.config.option.runxfail:
+         if xfailed and not xfailed.run:
+             xfail("[NOTRUN] " + xfailed.reason)
+
++    # Execute the test
+     yield
+
++    # Re-evaluate xfail markers after test execution in case they were added dynamically
++    item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
++
+
+ @hookimpl(hookwrapper=True)
+ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+     outcome = yield
+     rep = outcome.get_result()
+-    xfailed = item._store.get(xfailed_key, None)
++    # Re-evaluate xfail markers in case they were added dynamically during test execution
++    item._store[xfailed_key] = xfailed = evaluate_xfail_marks(item)
+     # unittest special case, see setting of unexpectedsuccess_key
+     if unexpectedsuccess_key in item._store and rep.when == "call":
+         reason = item._store[unexpectedsuccess_key]
+@@ -276,21 +290,35 @@ def pytest_runtest_makereport(item: Item, call: CallInfo[None]):
+         assert call.excinfo.value.msg is not None
+         rep.wasxfail = "reason: " + call.excinfo.value.msg
+         rep.outcome = "skipped"
+-    elif not rep.skipped and xfailed:
+-        if call.excinfo:
+-            raises = xfailed.raises
+-            if raises is not None and not isinstance(call.excinfo.value, raises):
+-                rep.outcome = "failed"
+-            else:
+-                rep.outcome = "skipped"
+-                rep.wasxfail = xfailed.reason
+-        elif call.when == "call":
+-            if xfailed.strict:
+-                rep.outcome = "failed"
+-                rep.longrepr = "[XPASS(strict)] " + xfailed.reason
+-            else:
+-                rep.outcome = "passed"
+-                rep.wasxfail = xfailed.reason
++    elif not rep.skipped:
++        # Check for dynamically added xfail markers
++        xfailed = item._store.get(xfailed_key, None)
++        if xfailed is None:
++            xfailed = evaluate_xfail_marks(item)
++            item._store[xfailed_key] = xfailed
++
++        # Check for expected failure state
++        if xfailed or getattr(item, '_expected_failure', False):
++            reason = xfailed.reason if xfailed else getattr(item, '_expected_failure_reason', 'xfail')
++            if call.excinfo:
++                raises = xfailed.raises if xfailed else None
++                if raises is not None and not isinstance(call.excinfo.value, raises):
++                    rep.outcome = "failed"
++                else:
++                    rep.outcome = "skipped"
++                    rep.wasxfail = reason
++                    # If this is a dynamically added xfail, mark as skipped
++                    if getattr(item, '_expected_failure', False):
++                        rep.outcome = "skipped"
++                        rep.wasxfail = reason
++            elif call.when == "call":
++                strict = xfailed.strict if xfailed else False
++                if strict:
++                    rep.outcome = "failed"
++                    rep.longrepr = "[XPASS(strict)] " + reason
++                else:
++                    rep.outcome = "passed"
++                    rep.wasxfail = reason
+
+     if (
+         item._store.get(skipped_by_mark_key, True)
+diff --git a/test_xfail.py b/test_xfail.py
+new file mode 100644
+index 000000000..e1d30df0c
+--- /dev/null
++++ b/test_xfail.py
+@@ -0,0 +1,6 @@
++import pytest
++
++def test_xfail_test(request):
++    mark = pytest.mark.xfail(reason="xfail")
++    request.node.add_marker(mark)
++    assert 0
+\ No newline at end of file

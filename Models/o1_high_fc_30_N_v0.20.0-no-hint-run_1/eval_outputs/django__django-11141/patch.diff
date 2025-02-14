@@ -1,0 +1,125 @@
+diff --git a/django/db/migrations/loader.py b/django/db/migrations/loader.py
+index 8c308621d2..9ac1f3b498 100644
+--- a/django/db/migrations/loader.py
++++ b/django/db/migrations/loader.py
+@@ -86,9 +86,7 @@ class MigrationLoader:
+             else:
+                 # Empty directories are namespaces.
+                 # getattr() needed on PY36 and older (replace w/attribute access).
+-                if getattr(module, '__file__', None) is None:
+-                    self.unmigrated_apps.add(app_config.label)
+-                    continue
++
+                 # Module is not a package (e.g. migrations.py).
+                 if not hasattr(module, '__path__'):
+                     self.unmigrated_apps.add(app_config.label)
+diff --git a/reproduce_namespace_pkg_error.py b/reproduce_namespace_pkg_error.py
+new file mode 100644
+index 0000000000..4c991c420a
+--- /dev/null
++++ b/reproduce_namespace_pkg_error.py
+@@ -0,0 +1,56 @@
++import sys
++import os
++
++# Add Django from this repository to our import path
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import django
++from django.conf import settings
++from django.core.management import call_command
++
++def create_test_app_no_init():
++    app_dir = os.path.join(os.path.dirname(__file__), 'testnamespaceapp')
++    migrations_dir = os.path.join(app_dir, 'migrations')
++
++    os.makedirs(migrations_dir, exist_ok=True)
++
++    # Create a minimal models.py so we have something to migrate
++    models_py = os.path.join(app_dir, 'models.py')
++    if not os.path.exists(models_py):
++        with open(models_py, 'w') as f:
++            f.write("from django.db import models\n\nclass MyTestModel(models.Model):\n    name = models.CharField(max_length=50)\n")
++
++def configure_settings():
++    settings.configure(
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++            'testnamespaceapp',
++        ],
++        SECRET_KEY='secret-key',
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:'
++            }
++        },
++        MIDDLEWARE=[],
++        ROOT_URLCONF=__name__,
++    )
++    django.setup()
++
++def main():
++    create_test_app_no_init()
++    configure_settings()
++    try:
++        print('Running makemigrations on testnamespaceapp...')
++        call_command('makemigrations', 'testnamespaceapp', verbosity=2)
++        print('Running migrate...')
++        call_command('migrate', verbosity=2)
++        print('Migrate command completed successfully.')
++    except Exception as e:
++        print('An error occurred:', e)
++        raise
++
++if __name__ == '__main__':
++    main()
+diff --git a/reproduce_namespace_pkg_error_broken.py b/reproduce_namespace_pkg_error_broken.py
+new file mode 100644
+index 0000000000..51fd6b2e10
+--- /dev/null
++++ b/reproduce_namespace_pkg_error_broken.py
+@@ -0,0 +1 @@
++import sys, os\n\n# Add Django from this repository to our import path\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n\nimport django\nfrom django.conf import settings\nfrom django.core.management import call_command\n\ndef create_test_app_no_init():\n    app_dir = os.path.join(os.path.dirname(__file__), 'testnamespaceapp')\n    migrations_dir = os.path.join(app_dir, 'migrations')\n\n    os.makedirs(migrations_dir, exist_ok=True)\n\n    # Create a minimal models.py so we have something to migrate\n    models_py = os.path.join(app_dir, 'models.py')\n    if not os.path.exists(models_py):\n        with open(models_py, 'w') as f:\n            f.write("""\nfrom django.db import models\n\nclass MyTestModel(models.Model):\n    name = models.CharField(max_length=50)\n""")\n\n# Configure settings\ndef configure_settings():\n    settings.configure(\n        INSTALLED_APPS = [\n            'django.contrib.auth',\n            'django.contrib.contenttypes',\n            'testnamespaceapp',\n        ],\n        SECRET_KEY = 'secret-key',\n        DATABASES = {\n            'default': {\n                'ENGINE': 'django.db.backends.sqlite3',\n                'NAME': ':memory:'\n            }\n        },\n        MIDDLEWARE = [],\n        ROOT_URLCONF = __name__,\n    )\n    django.setup()\n\ndef main():\n    create_test_app_no_init()\n    configure_settings()\n\n    # Now try making and running migrations\n    try:\n        print('Running makemigrations on testnamespaceapp...')\n        call_command('makemigrations', 'testnamespaceapp', verbosity=2)\n        print('Running migrate...')\n        call_command('migrate', verbosity=2)\n        print('Migrate command completed successfully.')\n    except Exception as e:\n        print('An error occurred:', e)\n        raise\n\nif __name__ == '__main__':\n    main()
+\ No newline at end of file
+diff --git a/testnamespaceapp/migrations/0001_initial.py b/testnamespaceapp/migrations/0001_initial.py
+new file mode 100644
+index 0000000000..9de2056fd8
+--- /dev/null
++++ b/testnamespaceapp/migrations/0001_initial.py
+@@ -0,0 +1,21 @@
++# Generated by Django 3.1 on 2025-01-13 22:59
++
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++
++    initial = True
++
++    dependencies = [
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name='MyTestModel',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('name', models.CharField(max_length=50)),
++            ],
++        ),
++    ]
+diff --git a/testnamespaceapp/migrations/__init__.py b/testnamespaceapp/migrations/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testnamespaceapp/models.py b/testnamespaceapp/models.py
+new file mode 100644
+index 0000000000..80904c57a9
+--- /dev/null
++++ b/testnamespaceapp/models.py
+@@ -0,0 +1,4 @@
++from django.db import models
++
++class MyTestModel(models.Model):
++    name = models.CharField(max_length=50)

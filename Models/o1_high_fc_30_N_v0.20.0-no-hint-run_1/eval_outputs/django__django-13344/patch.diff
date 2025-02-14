@@ -1,0 +1,96 @@
+diff --git a/django/utils/deprecation.py b/django/utils/deprecation.py
+index b2c681b33c..668889858d 100644
+--- a/django/utils/deprecation.py
++++ b/django/utils/deprecation.py
+@@ -131,6 +131,9 @@ class MiddlewareMixin:
+                 thread_sensitive=True,
+             )(request)
+         response = response or await self.get_response(request)
++        import asyncio
++        if asyncio.iscoroutine(response):
++            response = await response
+         if hasattr(self, 'process_response'):
+             response = await sync_to_async(
+                 self.process_response,
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..c4c020fa4d
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,62 @@
++import os
++import sys
++
++import django
++from django.conf import settings
++from django.http import HttpResponse
++from django.urls import path
++from django.core.asgi import get_asgi_application
++
++# A dummy middleware as described by the user to demonstrate the problem.
++
++class DummyMiddleware:
++    def __init__(self, get_response):
++        self.get_response = get_response
++
++    def __call__(self, request):
++        response = self.get_response(request)
++        return response
++
++    def process_response(self, request, response):
++        print("DummyMiddleware sees request:", request.__class__, "response:", response.__class__)
++        return response
++
++# A simple view to return an HttpResponse
++
++def test_view(request):
++    return HttpResponse("Hello from a test view")
++
++urlpatterns = [
++    path('', test_view),
++]
++
++# A minimal function to configure Django settings, then run the server under asgi.
++
++def run_server():
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            SECRET_KEY='secret',
++            ALLOWED_HOSTS=['*'],
++            ROOT_URLCONF=__name__,
++            MIDDLEWARE=[
++                __name__ + '.DummyMiddleware',
++                'django.middleware.common.CommonMiddleware',
++            ],
++            USE_TZ=True,
++        )
++    django.setup()
++    application = get_asgi_application()
++
++    # If uvicorn is not installed, you can install it with: pip install uvicorn
++    # Then run: python reproduce_error.py
++    try:
++        import uvicorn
++    except ImportError:
++        print("Please install uvicorn to run this demo: pip install uvicorn")
++        sys.exit(1)
++
++    uvicorn.run(application, host='127.0.0.1', port=8000)
++
++if __name__ == "__main__":
++    run_server()
+diff --git a/server.log b/server.log
+new file mode 100644
+index 0000000000..5d813fe10e
+--- /dev/null
++++ b/server.log
+@@ -0,0 +1,8 @@
++INFO:     Started server process [685]
++INFO:     Waiting for application startup.
++INFO:     ASGI 'lifespan' protocol appears unsupported.
++INFO:     Application startup complete.
++INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
++INFO:     127.0.0.1:47500 - "GET / HTTP/1.1" 200 OK
++INFO:     Shutting down
++INFO:     Finished server process [685]

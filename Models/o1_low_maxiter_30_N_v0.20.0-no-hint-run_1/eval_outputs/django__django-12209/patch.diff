@@ -1,0 +1,84 @@
+diff --git a/db.sqlite3 b/db.sqlite3
+new file mode 100644
+index 0000000000..b64657868d
+Binary files /dev/null and b/db.sqlite3 differ
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index e3b14a41a0..c132759115 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -847,12 +847,13 @@ class Model(metaclass=ModelBase):
+         if not pk_set and (force_update or update_fields):
+             raise ValueError("Cannot force an update in save() with no primary key.")
+         updated = False
+-        # Skip an UPDATE when adding an instance and primary key has a default.
++        # Skip an UPDATE only if PK is not explicitly set, and PK has a default.
+         if (
+-            not force_insert and
+-            self._state.adding and
+-            self._meta.pk.default and
+-            self._meta.pk.default is not NOT_PROVIDED
++            not force_insert
++            and self._state.adding
++            and self._meta.pk.default
++            and self._meta.pk.default is not NOT_PROVIDED
++            and pk_val is None
+         ):
+             force_insert = True
+         # If possible, try an UPDATE. If that doesn't update anything, do an INSERT.
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..4305f7256e
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,50 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from uuid import uuid4
++
++# Minimal Django settings for this script
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++settings.configure(
++    INSTALLED_APPS=["__main__"],
++    DATABASES={
++        "default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": os.path.join(BASE_DIR, "db.sqlite3"),
++        }
++    },
++    SECRET_KEY="test",
++)
++
++# Define the model from the PR description
++
++def get_model():
++    class Sample(models.Model):
++        id = models.UUIDField(primary_key=True, default=uuid4)
++        name = models.CharField(blank=True, max_length=100)
++    return Sample
++
++def main():
++    django.setup()
++    # Ensure the table is created
++    Sample = get_model()
++    with django.db.connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Sample)
++
++    # Reproduce the scenario described in the PR:
++    # 1. Create a Sample instance s0
++    s0 = Sample.objects.create()
++    print("Created first instance:", s0.pk)
++
++    # 2. Create a second instance s1 with same pk as s0, set name
++    s1 = Sample(pk=s0.pk, name='Test 1')
++    print("Created second instance with explicit pk:", s1.pk)
++
++    # 3. Save s1 (expected behavior before was INSERT + UPDATE,
++    # but on Django 3.0 might do two INSERTS)
++    s1.save()
++    print("Saved second instance successfully")
++
++if __name__ == "__main__":
++    main()
+\ No newline at end of file

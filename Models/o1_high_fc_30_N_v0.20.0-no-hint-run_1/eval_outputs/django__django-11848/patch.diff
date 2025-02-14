@@ -1,0 +1,55 @@
+diff --git a/django/utils/http.py b/django/utils/http.py
+index 572cfb4347..fb19af39f1 100644
+--- a/django/utils/http.py
++++ b/django/utils/http.py
+@@ -176,6 +176,7 @@ def parse_http_date(date):
+     try:
+         year = int(m.group('year'))
+         if year < 100:
++            # interpret as rfc850 two-digit year (RFC 7231 logic)
+             if year < 70:
+                 year += 2000
+             else:
+@@ -185,8 +186,11 @@ def parse_http_date(date):
+         hour = int(m.group('hour'))
+         min = int(m.group('min'))
+         sec = int(m.group('sec'))
+-        result = datetime.datetime(year, month, day, hour, min, sec)
+-        return calendar.timegm(result.utctimetuple())
++        temp_date = datetime.datetime(year, month, day, hour, min, sec)
++        # If this is more than 50 years in the future, interpret as the most recent past year.
++        if (temp_date - datetime.datetime.utcnow()).total_seconds() > 50 * 365 * 24 * 3600:
++            temp_date = datetime.datetime(temp_date.year - 100, month, day, hour, min, sec)
++        return calendar.timegm(temp_date.utctimetuple())
+     except Exception as exc:
+         raise ValueError("%r is not a valid date" % date) from exc
+
+diff --git a/reproduce_rfc850_bug.py b/reproduce_rfc850_bug.py
+new file mode 100644
+index 0000000000..1e64f4249d
+--- /dev/null
++++ b/reproduce_rfc850_bug.py
+@@ -0,0 +1,23 @@
++import sys
++import datetime
++from django.utils.http import parse_http_date
++
++"""
++This script reproduces the two-digit year bug in Django's parse_http_date.
++We'll parse an RFC 850 date with two-digit year and show the result.
++"""
++
++def test_rfc850_date(date_str):
++    print(f"Parsing RFC 850 date: {date_str}")
++    try:
++        epoch_time = parse_http_date(date_str)
++        dt = datetime.datetime.utcfromtimestamp(epoch_time)
++        print(f"Successfully parsed as: {dt} UTC")
++    except Exception as e:
++        print(f"Failed to parse: {e}")
++
++if __name__ == "__main__":
++    # A two-digit year that is currently interpreted by old logic using a fixed pivot.
++    # For example, '72' in the old code is interpreted as 1972. We want to see if it might be more correctly 2072.
++    date_str = "Tuesday, 06-Nov-72 08:49:37 GMT"  # An RFC 850 style date
++    test_rfc850_date(date_str)

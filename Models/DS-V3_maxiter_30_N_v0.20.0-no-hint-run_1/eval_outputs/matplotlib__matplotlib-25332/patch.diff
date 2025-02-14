@@ -1,0 +1,145 @@
+diff --git a/lib/matplotlib/cbook.py b/lib/matplotlib/cbook.py
+index c9699b2e21..c1d1c0032a 100644
+--- a/lib/matplotlib/cbook.py
++++ b/lib/matplotlib/cbook.py
+@@ -751,7 +751,50 @@ def print_cycles(objects, outstream=sys.stdout, show_progress=False):
+         recurse(obj, obj, {}, [])
+
+
++class StrongGrouper:
++    """A Grouper variant that uses strong references for pickling"""
++    def __init__(self):
++        self._mapping = {}
++
++    def join(self, a, b):
++        """Join two objects together"""
++        root_a = self._find(a)
++        root_b = self._find(b)
++        if root_a != root_b:
++            self._mapping[root_a] = root_b
++
++    def _find(self, a):
++        """Find the root of an object"""
++        while a in self._mapping:
++            a = self._mapping[a]
++        return a
++
++    def joined(self, a, b):
++        """Return whether two objects are joined"""
++        return self._find(a) == self._find(b)
++
++    def __iter__(self):
++        """Iterate over all groups"""
++        groups = {}
++        for a in self._mapping:
++            root = self._find(a)
++            groups.setdefault(root, []).append(a)
++        return iter(groups.values())
++
+ class Grouper:
++    def __getstate__(self):
++        """Return state for pickling, converting weakrefs to strong refs"""
++        state = self.__dict__.copy()
++        # Convert weakrefs to strong refs for pickling
++        if hasattr(self, '_mapping'):
++            state['_mapping'] = {k: v() for k, v in self._mapping.items() if v() is not None}
++        return state
++
++    def __setstate__(self, state):
++        """Restore state from pickle, converting strong refs back to weakrefs"""
++        if '_mapping' in state:
++            state['_mapping'] = {k: weakref.ref(v) for k, v in state['_mapping'].items()}
++        self.__dict__.update(state)
+     """
+     A disjoint-set data structure.
+
+diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py
+index b4c38368bf..b23af7e3dd 100644
+--- a/lib/matplotlib/figure.py
++++ b/lib/matplotlib/figure.py
+@@ -186,7 +186,7 @@ class FigureBase(Artist):
+         # groupers to keep track of x and y labels we want to align.
+         # see self.align_xlabels and self.align_ylabels and
+         # axis._get_tick_boxes_siblings
+-        self._align_label_groups = {"x": cbook.Grouper(), "y": cbook.Grouper()}
++        self._align_label_groups = {"x": cbook.StrongGrouper(), "y": cbook.StrongGrouper()}
+
+         self.figure = self
+         self._localaxes = []  # track all axes
+@@ -1472,11 +1472,76 @@ default: %(va)s
+         --------
+         matplotlib.figure.Figure.align_xlabels
+
++        matplotlib.figure.Figure.align_ylabels
++        """
++        # Store alignment state for restoration after pickling
++        self._alignment_state = {
++            'x': [(ax.get_xlabel(), ax.xaxis.get_label_position())
++                  for ax in (axs if axs is not None else self.axes)],
++            'y': [(ax.get_ylabel(), ax.yaxis.get_label_position())
++                  for ax in (axs if axs is not None else self.axes)]
++        }
++        self.align_xlabels(axs=axs)
++        self.align_ylabels(axs=axs)
++
++    def __getstate__(self):
++        """Handle pickling by temporarily clearing alignment groups"""
++        state = self.__dict__.copy()
++        # Clear weak references
++        state['_align_label_groups'] = {"x": cbook.Grouper(), "y": cbook.Grouper()}
++        return state
++
++    def __setstate__(self, state):
++        """Restore state and re-align labels"""
++        self.__dict__.update(state)
++        if hasattr(self, '_alignment_state'):
++            # Recreate alignment groups
++            self._align_label_groups = {"x": cbook.Grouper(), "y": cbook.Grouper()}
++            # Re-align labels
++            self.align_labels()
++        """
++        Align the xlabels and ylabels of subplots with the same subplots
++        row or column (respectively) if label alignment is being
++        done automatically (i.e. the label position is not manually set).
++
++        Alignment persists for draw events after this is called.
++
++        Parameters
++        ----------
++        axs : list of `~matplotlib.axes.Axes`
++            Optional list (or `~numpy.ndarray`) of `~matplotlib.axes.Axes`
++            to align the labels.
++            Default is to align all Axes on the figure.
++
++        See Also
++        --------
++        matplotlib.figure.Figure.align_xlabels
++
+         matplotlib.figure.Figure.align_ylabels
+         """
+         self.align_xlabels(axs=axs)
+         self.align_ylabels(axs=axs)
+
++    def __getstate__(self):
++        """Handle pickling by storing alignment info and clearing weak refs"""
++        state = self.__dict__.copy()
++        # Store alignment info
++        self._align_info = {
++            'x': [(ax.get_xlabel(), ax.xaxis.get_label_position())
++                  for ax in self.axes],
++            'y': [(ax.get_ylabel(), ax.yaxis.get_label_position())
++                  for ax in self.axes]
++        }
++        # Clear weak references
++        state['_align_label_groups'] = {"x": cbook.Grouper(), "y": cbook.Grouper()}
++        return state
++
++    def __setstate__(self, state):
++        """Restore state and re-align labels"""
++        self.__dict__.update(state)
++        if hasattr(self, '_align_info'):
++            self.align_labels()
++
+     def add_gridspec(self, nrows=1, ncols=1, **kwargs):
+         """
+         Return a `.GridSpec` that has this figure as a parent.  This allows

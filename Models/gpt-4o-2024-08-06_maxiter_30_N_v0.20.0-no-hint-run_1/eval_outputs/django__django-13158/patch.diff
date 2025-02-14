@@ -1,0 +1,85 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 07d6ffd4ca..075c5d6670 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -1001,6 +1001,9 @@ class QuerySet:
+         if isinstance(self, EmptyQuerySet):
+             qs = [q for q in other_qs if not isinstance(q, EmptyQuerySet)]
+             return qs[0]._combinator_query('union', *qs[1:], all=all) if qs else self
++        # If any queryset is none, the result should be none.
++        if any(isinstance(q, EmptyQuerySet) for q in other_qs):
++            return self.none()
+         return self._combinator_query('union', *other_qs, all=all)
+
+     def intersection(self, *other_qs):
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..e6a50a58fb
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,65 @@
++from django.conf import settings
++from django.db import models
++from django import forms
++from django.forms import ModelForm
++from django.test import TestCase
++
++# Configure minimal settings
++settings.configure(
++    INSTALLED_APPS=[__name__],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++def run_test():
++    # Define models
++    class Publication(models.Model):
++        pass
++
++    class Article(models.Model):
++        publications = models.ManyToManyField(Publication, blank=True, null=True)
++
++    # Define form
++    class ArticleForm(ModelForm):
++        publications = forms.ModelMultipleChoiceField(
++            Publication.objects.filter(id__lt=2).union(
++                Publication.objects.filter(id__gt=5)
++            ),
++            required=False,
++        )
++
++        class Meta:
++            model = Article
++            fields = ['publications']
++
++    # Test case to reproduce the issue
++    class ReproduceIssueTestCase(TestCase):
++        def setUp(self):
++            # Create some publications
++            for i in range(1, 10):
++                Publication.objects.create(id=i)
++
++        def test_form_submission(self):
++            form = ArticleForm(data={'publications': []})
++            if form.is_valid():
++                print("Form is valid.")
++                article = form.save()
++                # Check if no publications are added
++                if article.publications.count() != 0:
++                    print("Issue Reproduced: Publications were added when none were selected.")
++                else:
++                    print("No issue: No publications were added, as expected.")
++            else:
++                print("Form is not valid.")
++                print(form.errors)
++
++    TestCase.run(ReproduceIssueTestCase('test_form_submission'))
++
++if __name__ == '__main__':
++    import django
++    django.setup()
++    run_test()

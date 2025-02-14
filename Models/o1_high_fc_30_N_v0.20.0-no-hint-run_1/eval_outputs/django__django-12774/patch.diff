@@ -1,0 +1,70 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index d9c9b0db04..0fc4793193 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -689,8 +689,19 @@ class QuerySet:
+         """
+         assert not self.query.is_sliced, \
+             "Cannot use 'limit' or 'offset' with in_bulk"
+-        if field_name != 'pk' and not self.model._meta.get_field(field_name).unique:
+-            raise ValueError("in_bulk()'s field_name must be a unique field but %r isn't." % field_name)
++        if field_name != 'pk':
++            field = self.model._meta.get_field(field_name)
++            if not field.unique:
++                from django.db.models import UniqueConstraint
++                # If the field is not declared unique, check single-field UniqueConstraints
++                constraints = self.model._meta.constraints
++                if not any(
++                    isinstance(constraint, UniqueConstraint) and
++                    len(constraint.fields) == 1 and
++                    constraint.fields[0] == field_name
++                    for constraint in constraints
++                ):
++                    raise ValueError("in_bulk()'s field_name must be a unique field but %r isn't." % field_name)
+         if id_list is not None:
+             if not id_list:
+                 return {}
+diff --git a/reproduce_in_bulk_issue.py b/reproduce_in_bulk_issue.py
+new file mode 100644
+index 0000000000..8aa700d07e
+--- /dev/null
++++ b/reproduce_in_bulk_issue.py
+@@ -0,0 +1,38 @@
++import os
++import sys
++
++sys.path.insert(0, '/workspace/django__django__3.1')
++
++import django
++from django.conf import settings
++from django.db import models, connection
++
++settings.configure(
++    INSTALLED_APPS=['__main__'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++django.setup()
++
++class Article(models.Model):
++    slug = models.CharField(max_length=255)
++
++    class Meta:
++        constraints = [
++            models.UniqueConstraint(fields=["slug"], name="article_slug_unq")
++        ]
++
++# Create DB tables for this model without migrations
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Article)
++
++Article.objects.create(slug='test1')
++Article.objects.create(slug='test2')
++
++# Trigger the in_bulk call
++print("Calling in_bulk(field_name='slug'):", Article.objects.in_bulk(field_name='slug'))

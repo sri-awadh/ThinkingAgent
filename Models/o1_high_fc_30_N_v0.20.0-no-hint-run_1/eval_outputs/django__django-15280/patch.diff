@@ -1,0 +1,133 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index fb6639793a..53d463de4b 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -16,6 +16,7 @@ from django.db import (
+ )
+ from django.db.models import AutoField, DateField, DateTimeField, sql
+ from django.db.models.constants import LOOKUP_SEP
++# from django.db.models.fields import DEFERRED  # Removed to avoid circular import
+ from django.db.models.deletion import Collector
+ from django.db.models.expressions import Case, Expression, F, Ref, Value, When
+ from django.db.models.functions import Cast, Trunc
+@@ -2039,6 +2040,30 @@ class RelatedPopulator:
+             for rel_iter in self.related_populators:
+                 rel_iter.populate(row, obj)
+         self.local_setter(from_obj, obj)
++        # Fix for properly merging deferred fields when an object is prefetch_related.
++        # Fix the deferred fields issue by forcibly "un-deferring" any fields
++        # that actually got loaded from the prefetch. We'll do a safe check for
++        # the sentinel by looking at the object's class name.
++        if obj is not None:
++            for i, field_attname in enumerate(self.init_list):
++                # If the item is not the 'Deferred' sentinel, we set it onto __dict__.
++                if getattr(obj_data[i].__class__, '__name__', None) != 'Deferred':
++                    obj.__dict__[field_attname] = obj_data[i]
++
++        # Attempt to fix the deferred fields issue by updating any actually-loaded fields.
++        if obj is not None:
++            from django.db.models.base import Deferred as DeferredClass
++            for i, field_attname in enumerate(self.init_list):
++                if not isinstance(obj_data[i], DeferredClass):
++                    setattr(obj, field_attname, obj_data[i])
++
++        # If for some reason the same instance is re-used, ensure that any actually-loaded
++        # fields are not still seen as deferred.
++        if obj is not None:
++            for i, field_attname in enumerate(self.init_list):
++                if obj_data[i] is not DEFERRED:
++                    setattr(obj, field_attname, obj_data[i])
++
+         if obj is not None:
+             self.remote_setter(obj, from_obj)
+
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..b3cd8d3dab
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,84 @@
++import django
++import os
++import sys
++
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        MIGRATION_MODULES={
++            '__main__': None
++        },
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:'
++            }
++        },
++        MIDDLEWARE=[],
++    )
++
++import django
++django.setup()
++
++from django.db import models
++from django.db import connection
++from django.core.management import call_command
++from django.db import transaction
++from django.test.utils import CaptureQueriesContext
++from django.db.models import Prefetch
++
++# Minimal reproduction models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10,
++        choices=[('ADMIN', 'Admin'), ('REGULAR', 'Regular')]
++    )
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++
++# We'll create the DB tables, then run the scenario from the pr_description.
++
++def main():
++    call_command('migrate', run_syncdb=True, interactive=False, verbosity=0)
++
++    with transaction.atomic():
++        # Create test data.
++        user = User.objects.create(email='test@example.com', kind='ADMIN')
++    Profile.objects.create(user=user, full_name='Test Tester')
++
++    # The query from the PR description.
++    queryset = User.objects.only('email').prefetch_related(
++        Prefetch(
++            'profile',
++            queryset=Profile.objects.prefetch_related(
++                Prefetch('user', queryset=User.objects.only('kind'))
++            ),
++        )
++    )
++
++    # The pr_description says: with self.assertNumQueries(3): user = queryset.first()
++    # We'll replicate that logic.
++    with CaptureQueriesContext(connection) as ctx:
++        user_obj = queryset.first()
++    print(f"Number of queries for user = queryset.first(): {len(ctx.captured_queries)}")
++    for i, q in enumerate(ctx.captured_queries, start=1):
++        print(f"  Query #{i}: {q['sql']}")
++
++    # Next, we want to ensure user.profile.user.kind does NOT do a new query.
++    # The PR description expects 0 queries.
++    with CaptureQueriesContext(connection) as ctx:
++        actual_kind = user_obj.profile.user.kind
++    num_new = len(ctx.captured_queries)
++    print(f"Number of queries for accessing user_obj.profile.user.kind: {num_new}")
++    print(f"Kind is: {actual_kind}")
++
++if __name__ == '__main__':
++    main()

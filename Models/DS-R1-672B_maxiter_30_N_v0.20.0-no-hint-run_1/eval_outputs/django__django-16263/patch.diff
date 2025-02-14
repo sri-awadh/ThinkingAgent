@@ -1,0 +1,99 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index de49e1c58c..961cd822fd 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -622,7 +622,9 @@ class QuerySet(AltersData):
+         if self._result_cache is not None:
+             return len(self._result_cache)
+
+-        return self.query.get_count(using=self.db)
++        query = self.query.chain()
++        query.strip_unused_annotations()
++        return query.get_count(using=self.db)
+
+     async def acount(self):
+         return await sync_to_async(self.count)()
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 9735ce10c8..7e8c38576a 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -2210,6 +2210,79 @@ class Query(BaseExpression):
+         if clear_default:
+             self.default_ordering = False
+
++    def strip_unused_annotations(self):
++        """
++        Remove annotations that are not referenced by filters, ordering, or
++        other annotations to optimize queries.
++        """
++        used_annotations = set()
++        # Collect annotations used in where clause
++        for child in self.where.children:
++            if isinstance(child, tuple) and child[0] in self.annotations:
++                used_annotations.add(child[0])
++            elif hasattr(child, 'get_refs'):
++                used_annotations.update(ref for ref in child.get_refs() if ref in self.annotations)
++
++        # Collect annotations used in order_by
++        for order in self.order_by:
++            parts = order.split(LOOKUP_SEP)
++            if parts[0].lstrip('-') in self.annotations:
++                used_annotations.add(parts[0].lstrip('-'))
++
++        # Collect annotations used in other annotations
++        for alias, annotation in self.annotations.items():
++            used_annotations.update(ref for ref in annotation.get_refs() if ref in self.annotations)
++
++        # Preserve only used annotations
++        self.annotations = {
++            alias: annotation
++            for alias, annotation in self.annotations.items()
++            if alias in used_annotations
++        }
++
++    def strip_unused_annotations(self):
++        """Remove annotations not referenced in filters/ordering/other annotations"""
++        used = set()
++        # Collect annotation refs from WHERE clause
++        for child in self.where.children:
++            if hasattr(child, 'get_refs'):
++                used.update(ref for ref in child.get_refs() if ref in self.annotations)
++        # Collect from ORDER BY
++        for order in self.order_by:
++            parts = order.lstrip('-').split(LOOKUP_SEP, 1)
++            if parts[0] in self.annotations:
++                used.add(parts[0])
++        # Collect from other annotations
++        for alias, annotation in self.annotations.items():
++            used.update(annotation.get_refs())
++        # Filter annotations
++        self.annotations = {a: v for a, v in self.annotations.items() if a in used}
++
++    def strip_unused_annotations(self):
++        """
++        Remove annotations that are not referenced by filters, ordering,
++        or other annotations to optimize count() queries.
++        """
++        used_annotations = set()
++        # Collect annotations used in filters
++        for child in self.where.children:
++            if hasattr(child, 'get_refs'):
++                used_annotations.update(ref for ref in child.get_refs() if ref in self.annotations)
++        # Collect annotations used in ordering
++        for order in self.order_by:
++            parts = order.lstrip('-').split(LOOKUP_SEP)
++            if parts[0] in self.annotations:
++                used_annotations.add(parts[0])
++        # Collect annotations used in other annotations
++        for alias, annotation in self.annotations.items():
++            used_annotations.update(annotation.get_refs())
++        # Remove unused annotations
++        self.annotations = {
++            alias: annotation
++            for alias, annotation in self.annotations.items()
++            if alias in used_annotations
++        }
++
+     def set_group_by(self, allow_aliases=True):
+         """
+         Expand the GROUP BY clause required by the query.

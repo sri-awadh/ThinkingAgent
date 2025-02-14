@@ -1,0 +1,122 @@
+diff --git a/delete_repro.py b/delete_repro.py
+new file mode 100644
+index 0000000000..ca573bf6db
+--- /dev/null
++++ b/delete_repro.py
+@@ -0,0 +1,43 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure minimal settings in-memory.
++
++settings.configure(
++    INSTALLED_APPS=["__main__"],
++    DATABASES={
++        "default": {
++            "ENGINE": "django.db.backends.sqlite3",
++            "NAME": ":memory:",
++        }
++    },
++    SECRET_KEY="dummy-key",
++)
++
++# Set up Django.
++django.setup()
++
++class T(models.Model):
++    c = models.IntegerField(primary_key=True)
++    class Meta:
++        db_table = 'test_t'
++
++if __name__ == "__main__":
++    from django.core.management import call_command
++
++    print("Applying migrations...")
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(T)
++
++    print("Creating test records...")
++    for i in range(1, 100001):
++        T.objects.create(c=i)
++
++    print("Deleting all objects...")
++    T.objects.all().delete()
++
++    print("Collected queries executed:")
++    for q in connection.queries:
++        print(q["sql"])
+\ No newline at end of file
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 29e33c075f..58976bd696 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1405,8 +1405,33 @@ class SQLInsertCompiler(SQLCompiler):
+
+
+ class SQLDeleteCompiler(SQLCompiler):
++    def as_sql(self):
++        # If we have no WHERE at all, perform a simple "DELETE FROM table".
++        # That is the logic requested in the PR for performance reasons.
++        # This fixes the subquery performance regression and issues with LOCK TABLES.
++        no_filters = (not self.query.where or self.query.where.is_always_true()) and not self.query.having
++        if no_filters:
++            base_table = self.query.model._meta.db_table
++            return f"DELETE FROM {self.quote_name_unless_alias(base_table)}", ()
++        if self.single_alias:
++            return self._as_sql(self.query)
++        # Otherwise, fall back to the existing subquery logic.
++        innerq = self.query.clone()
++        innerq.__class__ = Query
++        innerq.clear_select_clause()
++        pk = self.query.model._meta.pk
++        innerq.select = [
++            pk.get_col(self.query.get_initial_alias())
++        ]
++        outerq = Query(self.query.model)
++        outerq.where = self.query.where_class()
++        outerq.add_q(Q(pk__in=innerq))
++        return self._as_sql(outerq)
++
+     @cached_property
+     def single_alias(self):
++        if not self.query.where:
++            return True
+         return sum(self.query.alias_refcount[t] > 0 for t in self.query.alias_map) == 1
+
+     def _as_sql(self, query):
+@@ -1418,24 +1443,20 @@ class SQLDeleteCompiler(SQLCompiler):
+             result.append('WHERE %s' % where)
+         return ' '.join(result), tuple(params)
+
++        if not self.query.where:
++            return self._as_sql(self.query)
++
+     def as_sql(self):
+         """
+         Create the SQL for this query. Return the SQL string and list of
++        if not self.query.where:
++            return 'DELETE FROM %s' % self.quote_name_unless_alias(self.query.get_meta().db_table), ()
++
+         parameters.
+         """
+-        if self.single_alias:
+-            return self._as_sql(self.query)
+-        innerq = self.query.clone()
+-        innerq.__class__ = Query
+-        innerq.clear_select_clause()
+-        pk = self.query.model._meta.pk
+-        innerq.select = [
+-            pk.get_col(self.query.get_initial_alias())
+-        ]
+-        outerq = Query(self.query.model)
+-        outerq.where = self.query.where_class()
+-        outerq.add_q(Q(pk__in=innerq))
+-        return self._as_sql(outerq)
++        if not self.query.base_table:
++            self.query.base_table = self.query.model._meta.db_table
++        return self._as_sql(self.query)
+
+
+ class SQLUpdateCompiler(SQLCompiler):

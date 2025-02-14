@@ -1,0 +1,104 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 8ea6c05ef9..ccd1e61046 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -202,9 +202,11 @@ class ModelBase(type):
+                 continue
+             # Locate OneToOneField instances.
+             for field in base._meta.local_fields:
+-                if isinstance(field, OneToOneField):
++                if isinstance(field, OneToOneField) and field.remote_field.parent_link:
+                     related = resolve_relation(new_class, field.remote_field.model)
+-                    parent_links[make_model_tuple(related)] = field
++                    existing_field = parent_links.get(make_model_tuple(related))
++          if existing_field is None or (field.remote_field.parent_link and not (existing_field.remote_field and existing_field.remote_field.parent_link)):
++              parent_links[make_model_tuple(related)] = field
+
+         # Track fields inherited from base models.
+         inherited_attributes = set()
+@@ -265,7 +267,11 @@ class ModelBase(type):
+                         new_class.add_to_class(attr_name, field)
+                 else:
+                     field = None
+-                new_class._meta.parents[base] = field
++                existing_field = new_class._meta.parents.get(base)
++                if existing_field is not None and existing_field.remote_field and existing_field.remote_field.parent_link:
++                    pass
++                else:
++                    new_class._meta.parents[base] = field
+             else:
+                 base_parents = base._meta.parents.copy()
+
+diff --git a/django/db/models/options.py b/django/db/models/options.py
+index a375f6ba1d..e77b9c8204 100644
+--- a/django/db/models/options.py
++++ b/django/db/models/options.py
+@@ -240,9 +240,13 @@ class Options:
+
+         if self.pk is None:
+             if self.parents:
+-                # Promote the first parent link in lieu of adding yet another
+-                # field.
+-                field = next(iter(self.parents.values()))
++                # If there's a field with parent_link=True, pick that first, else pick the first parent
++                parent_fields = list(self.parents.values())
++                preferred_parent_fields = [fld for fld in parent_fields if fld.remote_field and fld.remote_field.parent_link]
++                if preferred_parent_fields:
++                    field = preferred_parent_fields[0]
++                else:
++                    field = parent_fields[0]
+                 # Look for a local field with the same name as the
+                 # first parent link. If a local field has already been
+                 # created, use it instead of promoting the parent
+@@ -252,9 +256,9 @@ class Options:
+                 field.primary_key = True
+                 self.setup_pk(field)
+                 if not field.remote_field.parent_link:
+-                    raise ImproperlyConfigured(
+-                        'Add parent_link=True to %s.' % field,
+-                    )
++                    fields_with_parent_link = [p for p in parent_fields if p.remote_field and p.remote_field.parent_link]
++                    if not fields_with_parent_link:
++                        raise ImproperlyConfigured('Add parent_link=True to %s.' % field)
+             else:
+                 auto = AutoField(verbose_name='ID', primary_key=True, auto_created=True)
+                 model.add_to_class('id', auto)
+diff --git a/reproduce_bug.py b/reproduce_bug.py
+new file mode 100644
+index 0000000000..224bf5296f
+--- /dev/null
++++ b/reproduce_bug.py
+@@ -0,0 +1,32 @@
++import django
++from django.conf import settings
++from django.db import models
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=["__main__"],
++        SECRET_KEY="xxx",
++        DATABASES={
++            "default": {
++                "ENGINE": "django.db.backends.sqlite3",
++                "NAME": ":memory:",
++            }
++        },
++    )
++
++django.setup()
++
++class Document(models.Model):
++    pass
++
++class Picking(Document):
++    document_ptr = models.OneToOneField(Document, on_delete=models.CASCADE, parent_link=True, related_name='+')
++    origin = models.OneToOneField(Document, related_name='picking', on_delete=models.PROTECT)
++
++# Accessing model metadata can trigger Django's internal checks.
++# If there's an error with how parent_link is handled, that should show up here.
++
++for model in (Document, Picking):
++    opts = model._meta
++    print(f"Model: {opts.label}")
++print("Script finished.")
+\ No newline at end of file

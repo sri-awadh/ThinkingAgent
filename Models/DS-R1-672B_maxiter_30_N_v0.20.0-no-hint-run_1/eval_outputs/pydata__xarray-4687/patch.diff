@@ -1,0 +1,79 @@
+diff --git a/test_xarray_where.py b/test_xarray_where.py
+new file mode 100644
+index 00000000..26016a2e
+--- /dev/null
++++ b/test_xarray_where.py
+@@ -0,0 +1,31 @@
++import xarray as xr
++import numpy as np
++
++# Original MCVE
++da = xr.DataArray(1)
++da.attrs['foo'] = 'bar'
++result = xr.where(da == 0, -1, da)
++print("Attributes after where:", result.attrs)
++print("Dtype after where:", result.dtype)
++
++# Extended test with dtype preservation
++data = xr.DataArray(np.ones([2,2], dtype=np.int8))
++data.attrs["attr1"] = "test"
++result2 = xr.where(data == 1, 5, 0)
++print("\nDtype preservation test:", result2.dtype, result2.attrs)
++EOF > test_xarray_where.py
++import xarray as xr
++import numpy as np
++
++# Original MCVE
++da = xr.DataArray(1)
++da.attrs['foo'] = 'bar'
++result = xr.where(da == 0, -1, da)
++print("Attributes after where:", result.attrs)
++print("Dtype after where:", result.dtype)
++
++# Extended test with dtype preservation
++data = xr.DataArray(np.ones([2,2], dtype=np.int8))
++data.attrs["attr1"] = "test"
++result2 = xr.where(data == 1, 5, 0)
++print("\nDtype preservation test:", result2.dtype, result2.attrs)
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 9fe93c88..9dc8d846 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -276,7 +276,8 @@ def apply_dataarray_vfunc(
+             args, join=join, copy=False, exclude=exclude_dims, raise_on_invalid=False
+         )
+
+-    objs = _all_of_type(args, DataArray)
++    # Exclude first arg (condition) for attribute merging
++    objs = _all_of_type(args[1:], DataArray)  # Skip condition in args[0]
+
+     if keep_attrs == "drop":
+         name = result_name(args)
+@@ -290,6 +291,14 @@ def apply_dataarray_vfunc(
+     data_vars = [getattr(a, "variable", a) for a in args]
+     result_var = func(*data_vars)
+
++    # Preserve original dtype
++    if keep_attrs != 'drop' and objs:
++        original_dtype = objs[0].dtype
++        if isinstance(result_var, tuple):
++            result_var = tuple(var.astype(original_dtype) for var in result_var)
++        else:
++            result_var = result_var.astype(original_dtype)
++
+     if signature.num_outputs > 1:
+         out = tuple(
+             DataArray(variable, coords, name=name, fastpath=True)
+@@ -299,7 +308,11 @@ def apply_dataarray_vfunc(
+         (coords,) = result_coords
+         out = DataArray(result_var, coords, name=name, fastpath=True)
+
+-    attrs = merge_attrs([x.attrs for x in objs], combine_attrs=keep_attrs)
++    # Merge attributes only from non-condition DataArrays
++    attrs = merge_attrs(
++        [x.attrs for x in objs],
++        combine_attrs=keep_attrs if keep_attrs != "override" else "drop_conflicts"
++    )
+     if isinstance(out, tuple):
+         for da in out:
+             da.attrs = attrs

@@ -1,0 +1,97 @@
+diff --git a/align_labels_pickle_repro.py b/align_labels_pickle_repro.py
+new file mode 100644
+index 0000000000..182951fe82
+--- /dev/null
++++ b/align_labels_pickle_repro.py
+@@ -0,0 +1,19 @@
++import matplotlib.pyplot as plt
++import pickle
++
++fig = plt.figure()
++ax1 = fig.add_subplot(211)
++ax2 = fig.add_subplot(212)
++time = [0, 1, 2, 3, 4]
++speed = [40000, 4300, 4500, 4700, 4800]
++acc = [10, 11, 12, 13, 14]
++ax1.plot(time, speed)
++ax1.set_ylabel('speed')
++ax2.plot(time, acc)
++ax2.set_ylabel('acc')
++
++fig.align_labels()  # pickling fails with this line present
++
++pickle.dumps(fig)
++print('Pickling succeeded!')
++plt.show()
+diff --git a/lib/matplotlib/cbook.py b/lib/matplotlib/cbook.py
+index c9699b2e21..3727ecb514 100644
+--- a/lib/matplotlib/cbook.py
++++ b/lib/matplotlib/cbook.py
+@@ -752,6 +752,19 @@ def print_cycles(objects, outstream=sys.stdout, show_progress=False):
+
+
+ class Grouper:
++    def __reduce_ex__(self, proto):
++        # Don’t pickle anything from Grouper.
++        return (self.__class__, ())
++    def __getstate__(self):
++        # Return nothing so that weak references aren’t pickled.
++        return {}
++
++    def __setstate__(self, state):
++        # Reinitialize an empty Grouper when unpickled.
++        self.__init__()
++    def __reduce__(self):
++        # Don’t try to pickle anything in this object.
++        return (self.__class__, ())
+     """
+     A disjoint-set data structure.
+
+@@ -847,6 +860,26 @@ class Grouper:
+         return [x() for x in siblings]
+
+
++    def __getstate__(self):
++        group_map = {}
++        for group in self._mapping.values():
++            group_map[id(group)] = group
++        group_list = []
++        for group in group_map.values():
++            real_objs = []
++            for ref in group:
++                obj = ref()
++                if obj is not None:
++                    real_objs.append(obj)
++            group_list.append(real_objs)
++        return {'_group_list': group_list}
++
++    def __setstate__(self, state):
++        self.__init__()
++        for real_objs in state['_group_list']:
++            if real_objs:
++                self.join(real_objs[0], *real_objs[1:])
++
+ class GrouperView:
+     """Immutable view over a `.Grouper`."""
+
+diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py
+index b4c38368bf..bd3da09b98 100644
+--- a/lib/matplotlib/figure.py
++++ b/lib/matplotlib/figure.py
+@@ -192,6 +192,16 @@ class FigureBase(Artist):
+         self._localaxes = []  # track all axes
+         self.artists = []
+         self.lines = []
++    def __getstate__(self):
++        state = super().__getstate__()
++        new_state = state.copy()
++        new_state.pop('_align_label_groups', None)
++        return new_state
++
++    def __setstate__(self, state):
++        super().__setstate__(state)
++        import matplotlib.cbook as cbook
++        self._align_label_groups = {"x": cbook.Grouper(), "y": cbook.Grouper()}
+         self.patches = []
+         self.texts = []
+         self.images = []

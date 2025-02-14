@@ -1,0 +1,78 @@
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..e095ed5dde 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -2,6 +2,7 @@ from django.apps.registry import Apps
+ from django.db import DatabaseError, models
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
++from django.db import router
+
+ from .exceptions import MigrationSchemaMissing
+
+@@ -62,6 +63,11 @@ class MigrationRecorder:
+         # in the codebase.
+         if self.has_table():
+             return
++        # Check if migrations are allowed on this database
++        print(f"Checking if migrations are allowed on database '{self.connection.alias}' for model '{self.Migration._meta.object_name}'")
++        if not router.allow_migrate(self.connection.alias, 'migrations', model_name=self.Migration._meta.object_name):
++            print(f"Migrations not allowed on database '{self.connection.alias}', skipping schema creation.")
++            return
+         # Make the table
+         try:
+             with self.connection.schema_editor() as editor:
+diff --git a/reproduce_error.py b/reproduce_error.py
+new file mode 100644
+index 0000000000..3652c63551
+--- /dev/null
++++ b/reproduce_error.py
+@@ -0,0 +1,48 @@
++from django.conf import settings
++from django.db import connections
++from django.db.migrations.recorder import MigrationRecorder
++
++# Configure settings for a multi-database setup
++if not settings.configured:
++    settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        },
++    },
++    DATABASE_ROUTERS=['reproduce_error.Router'],
++)
++
++import django
++
++django.setup()
++
++# Define a simple router
++class Router:
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        result = db == 'default'
++        print(f"allow_migrate called with db='{db}', app_label='{app_label}', model_name='{model_name}': {result}")
++        return result
++
++# Function to test migration recording
++def test_migration_recording():
++    for alias in connections:
++        connection = connections[alias]
++        recorder = MigrationRecorder(connection)
++        try:
++            if recorder.has_table():
++                print(f"Schema ensured for database '{alias}'")
++            else:
++                print(f"Schema not ensured for database '{alias}'")
++        except Exception as e:
++            print(f"Error ensuring schema for database '{alias}': {e}")
++        except Exception as e:
++            print(f"Error ensuring schema for database '{alias}': {e}")
++
++if __name__ == '__main__':
++    test_migration_recording()

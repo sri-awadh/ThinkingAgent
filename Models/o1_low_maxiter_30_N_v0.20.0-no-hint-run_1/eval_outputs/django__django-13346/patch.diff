@@ -1,0 +1,103 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fafc1beee8..f58d39d2d9 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -268,6 +268,7 @@ JSONField.register_lookup(HasKeys)
+ JSONField.register_lookup(HasAnyKeys)
+ JSONField.register_lookup(JSONExact)
+
++JSONField.register_lookup(KeyTransformIn)
+
+ class KeyTransform(Transform):
+     postgres_operator = '->'
+@@ -389,6 +390,33 @@ class KeyTransformExact(JSONExact):
+         return lhs, lhs_params
+
+     def process_rhs(self, compiler, connection):
++    return super().process_rhs(compiler, connection)
++
++class KeyTransformIn(lookups.In):
++    """
++    Provides support for 'field__key__in=[...]' lookups.
++    This ensures that for JSON key transforms, an __in lookup behaves similarly
++    to how an equality-based lookup does, i.e. field__key=[...].
++    """
++    def process_lhs(self, compiler, connection):
++        # Reuse JSONExact logic for the LHS to ensure we handle null/JSON values properly.
++        lhs, lhs_params = super(lookups.In, self).process_lhs(compiler, connection)
++        if connection.vendor == 'sqlite':
++            rhs, rhs_params = super(lookups.In, self).process_rhs(compiler, connection)
++            # If we are dealing with null values, we have custom logic (like in KeyTransformExact).
++            # However, let's keep it simpler for now.
++            # Use JSON_EXTRACT to handle JSON data on sqlite.
++            # No changes needed if we want to handle multiple items in the IN clause since
++            # we want them to be distinct.
++        return lhs, lhs_params
++
++    def get_prep_lookup(self):
++        """
++        Convert the lookup value into a list if it's not already.
++        """
++        if not isinstance(self.rhs, (list, tuple)):
++            return [self.rhs]
++        return self.rhs
+         if isinstance(self.rhs, KeyTransform):
+             return super(lookups.Exact, self).process_rhs(compiler, connection)
+         rhs, rhs_params = super().process_rhs(compiler, connection)
+diff --git a/reproduce_in_lookup_error.py b/reproduce_in_lookup_error.py
+new file mode 100644
+index 0000000000..45ff984dc3
+--- /dev/null
++++ b/reproduce_in_lookup_error.py
+@@ -0,0 +1,50 @@
++import os
++from django.conf import settings
++from django.db import models
++from django.core.management import execute_from_command_line
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test_key',
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['__main__'],
++)
++
++import django
++django.setup()
++
++try:
++    from django.db.models import JSONField
++except ImportError:
++    from django.contrib.postgres.fields import JSONField
++
++class OurModel(models.Model):
++    our_field = JSONField()
++    class Meta:
++        app_label = '__main__'
++
++# Instead of using migrations for a module named __main__, we create the table directly:
++from django.db import connection
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(OurModel)
++
++objs = []
++for i in range(1, 501):
++    objs.append(OurModel(our_field={'key': 0 if i <= 312 else i}))
++OurModel.objects.bulk_create(objs)
++
++first_items = OurModel.objects.filter(**{'our_field__key__in': [0]})
++print("Count of first_items (with __in):", len(first_items))
++
++second_items = OurModel.objects.filter(**{'our_field__key': 0})
++print("Count of second_items (with '='):   ", len(second_items))
++
++# Expected that they match but they do not in certain DB backends. Here we show the difference.
+\ No newline at end of file

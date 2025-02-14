@@ -1,0 +1,114 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index aaf35ee37c..c132265361 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -845,8 +845,30 @@ class Query(BaseExpression):
+         Change the aliases in change_map (which maps old-alias -> new-alias),
+         relabelling any references to them in select columns and the where
+         clause.
+-        """
+-        assert set(change_map).isdisjoint(change_map.values())
++
++        This assertion ensures that no alias is both a key and a value.
++        If that happens, an alias might be changed multiple times.
++        We'll rename collisions in 'change_map' to ensure disjoint sets.
++        """
++        colliding = set(change_map).intersection(change_map.values())
++        if colliding:
++            new_map = {}
++            used = set(change_map.keys()) | set(change_map.values())
++            for old_alias, new_alias in change_map.items():
++                final_alias = new_alias
++                while final_alias in change_map and final_alias != old_alias:
++                    final_alias += '_x'
++                if final_alias in used and final_alias != old_alias:
++                    i = 1
++                    base = final_alias
++                    while final_alias in used:
++                        final_alias = f"{base}_x{i}"
++                        i += 1
++                used.add(final_alias)
++                new_map[old_alias] = final_alias
++            change_map = new_map
++
++        assert set(change_map).isdisjoint(change_map.values()), "An alias might be changed multiple times if keys and values intersect."
+
+         # 1. Update references in "select" (normal columns plus aliases),
+         # "group by" and "where".
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..af2d15dcac
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,71 @@
++import os
++import sys
++
++# We'll do a minimal script that sets up an in-memory database using this local copy of Django.
++
++# Step 1: ensure this local Django is on the PYTHONPATH so we can import it.
++# We do that by adjusting sys.path.
++this_dir = os.path.dirname(os.path.abspath(__file__))
++parent_dir = os.path.dirname(this_dir)
++# The top-level django project directory is either this_dir or parent_dir
++# We'll guess it's `this_dir` if it contains a django/ folder, otherwise parent_dir.
++
++candidate_django_dir = os.path.join(this_dir, 'django')
++if not os.path.isdir(candidate_django_dir):
++    candidate_django_dir = os.path.join(parent_dir, 'django')
++
++if os.path.isdir(candidate_django_dir):
++    sys.path.insert(0, this_dir)
++    sys.path.insert(0, parent_dir)
++
++# Now let's import django.
++from django.conf import settings
++
++settings.configure(
++    SECRET_KEY='fake-key',
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[__name__],
++)
++
++import django
++
++django.setup()
++
++from django.db import models
++from django.db import connection
++from django.db.models import Q
++
++class Baz(models.Model):
++    pass
++
++class Qux(models.Model):
++    bazes = models.ManyToManyField(Baz, related_name='quxes')
++
++class Foo(models.Model):
++    qux = models.ForeignKey(Qux, on_delete=models.CASCADE, related_name='foos')
++
++class Bar(models.Model):
++    foo = models.ForeignKey(Foo, on_delete=models.CASCADE, related_name='bars')
++    another_foo = models.ForeignKey(Foo, on_delete=models.CASCADE, related_name='other_bars')
++    baz = models.ForeignKey(Baz, on_delete=models.CASCADE, related_name='bars')
++
++with connection.schema_editor() as editor:
++    editor.create_model(Baz)
++    editor.create_model(Qux)
++    editor.create_model(Foo)
++    editor.create_model(Bar)
++
++qux = Qux.objects.create()
++qs1 = qux.foos.all()
++qs2 = Foo.objects.filter(Q(bars__baz__in=qux.bazes.all()) | Q(other_bars__baz__in=qux.bazes.all()))
++
++try:
++    result = qs1 | qs2
++    print("No AssertionError occurred. Possibly already fixed or patch needed.")
++except AssertionError as e:
++    print("AssertionError occurred as expected:", e)

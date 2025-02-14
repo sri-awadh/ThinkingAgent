@@ -1,0 +1,62 @@
+diff --git a/django/core/management/commands/inspectdb.py b/django/core/management/commands/inspectdb.py
+index f9b4bfb477..efea3568d2 100644
+--- a/django/core/management/commands/inspectdb.py
++++ b/django/core/management/commands/inspectdb.py
+@@ -158,6 +158,9 @@ class Command(BaseCommand):
+                         field_type,
+                     )
+                     if field_type.startswith(('ForeignKey(', 'OneToOneField(')):
++                        related_column = relations[column_name][0]
++                        if related_column != 'id':
++                            field_desc += f', to_field=\"{{related_column}}\"'
+                         field_desc += ', models.DO_NOTHING'
+
+                     if extra_params:
+diff --git a/django/db/backends/sqlite3/introspection.py b/django/db/backends/sqlite3/introspection.py
+index ce097dbd72..4ec637766f 100644
+--- a/django/db/backends/sqlite3/introspection.py
++++ b/django/db/backends/sqlite3/introspection.py
+@@ -140,33 +140,19 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
+             if field_desc.startswith("UNIQUE"):
+                 continue
+
+-            m = re.search(r'references (\S*) ?\(["|]?(.*)["|]?\)', field_desc, re.I)
++            m = re.search(r'references (\S*)\s*\(["|]?(.*)["|]?\)', field_desc, re.I)
+             if not m:
+                 continue
+-            table, column = [s.strip('"') for s in m.groups()]
++            referenced_table, referenced_column = [s.strip('"') for s in m.groups()]
+
+             if field_desc.startswith("FOREIGN KEY"):
+-                # Find name of the target FK field
+-                m = re.match(r'FOREIGN KEY\s*\(([^\)]*)\).*', field_desc, re.I)
+-                field_name = m[1].strip('"')
++                fk_match = re.match(r'FOREIGN KEY\s*\(([^\)]*)\).*', field_desc, re.I)
++                field_name = fk_match[1].strip('"') if fk_match else field_desc.split()[2].strip('"')
+             else:
+                 field_name = field_desc.split()[0].strip('"')
+
+-            cursor.execute("SELECT sql FROM sqlite_master WHERE tbl_name = %s", [table])
+-            result = cursor.fetchall()[0]
+-            other_table_results = result[0].strip()
+-            li, ri = other_table_results.index('('), other_table_results.rindex(')')
+-            other_table_results = other_table_results[li + 1:ri]
+-
+-            for other_desc in other_table_results.split(','):
+-                other_desc = other_desc.strip()
+-                if other_desc.startswith('UNIQUE'):
+-                    continue
+-
+-                other_name = other_desc.split(' ', 1)[0].strip('"')
+-                if other_name == column:
+-                    relations[field_name] = (other_name, table)
+-                    break
++            # Store the direct reference to the column for introspection
++            relations[field_name] = (referenced_column, referenced_table)
+
+         return relations
+
+diff --git a/repro.db b/repro.db
+new file mode 100644
+index 0000000000..86b9bf474b
+Binary files /dev/null and b/repro.db differ

@@ -1,0 +1,180 @@
+diff --git a/_temp_build/_build/.doctrees/index.doctree b/_temp_build/_build/.doctrees/index.doctree
+new file mode 100644
+index 000000000..430475eda
+Binary files /dev/null and b/_temp_build/_build/.doctrees/index.doctree differ
+diff --git a/_temp_build/conf.py b/_temp_build/conf.py
+new file mode 100644
+index 000000000..3faae6247
+--- /dev/null
++++ b/_temp_build/conf.py
+@@ -0,0 +1,4 @@
++# Minimal config file for reproducing the literalinclude issue
++project = "TestProject"
++extensions = []
++master_doc = "index"
+diff --git a/_temp_build/index.rst b/_temp_build/index.rst
+new file mode 100644
+index 000000000..37ab35af4
+--- /dev/null
++++ b/_temp_build/index.rst
+@@ -0,0 +1,11 @@
++.. This file is used to reproduce the prepend dedent issue.
++
++Testing literalinclude with prepend and dedent:
++
++.. literalinclude:: pom.xml
++   :language: xml
++   :prepend: </plugin>
++   :start-at: <groupId>com.github.ekryd.sortpom</groupId>
++   :end-at: </plugin>
++
++   :linenos:
+diff --git a/_temp_build/pom.xml b/_temp_build/pom.xml
+new file mode 100644
+index 000000000..f7ecc68de
+--- /dev/null
++++ b/_temp_build/pom.xml
+@@ -0,0 +1,26 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..942f4bcc0
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,83 @@
++import os
++import subprocess
++import sys
++
++PROJECT_DIR = os.path.abspath(os.path.dirname(__file__))
++
++INDEX_RST = '''\
++.. This file is used to reproduce the prepend dedent issue.
++
++Testing literalinclude with prepend and dedent:
++
++.. literalinclude:: pom.xml
++   :language: xml
++   :prepend: </plugin>
++   :start-at: <groupId>com.github.ekryd.sortpom</groupId>
++   :end-at: </plugin>
++
++   :linenos:
++'''
++
++POM_XML = '''\
++<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>
++'''
++
++
++def main():
++    # Create a temporary directory for building the docs
++    temp_build_dir = os.path.join(PROJECT_DIR, '_temp_build')
++    if not os.path.exists(temp_build_dir):
++        os.makedirs(temp_build_dir)
++
++    # Write index.rst and pom.xml to the temp_build_dir
++    with open(os.path.join(temp_build_dir, 'index.rst'), 'w') as f:
++        f.write(INDEX_RST)
++    with open(os.path.join(temp_build_dir, 'pom.xml'), 'w') as f:
++        f.write(POM_XML)
++
++    # Run sphinx-build to attempt to build an XML or HTML to see if warnings or indentation issues occur
++    build_output_dir = os.path.join(temp_build_dir, '_build')
++    command = [
++        'sphinx-build',
++        '-W',  # turn warnings into errors
++        '-b', 'xml',  # build xml format
++        temp_build_dir,
++        build_output_dir,
++    ]
++
++    print("Running:", ' '.join(command))
++    process = subprocess.run(command, capture_output=True, text=True)
++
++    print("Return code:", process.returncode)
++    print("STDOUT:\n", process.stdout)
++    print("STDERR:\n", process.stderr)
++    if process.returncode != 0:
++        sys.exit(1)
++
++if __name__ == '__main__':
++    main()
+diff --git a/sphinx/directives/code.py b/sphinx/directives/code.py
+index dc44ed314..a1beea487 100644
+--- a/sphinx/directives/code.py
++++ b/sphinx/directives/code.py
+@@ -50,10 +50,8 @@ class Highlight(SphinxDirective):
+
+ def dedent_lines(lines: List[str], dedent: int, location: Tuple[str, int] = None) -> List[str]:
+     if dedent is None:
+-        return textwrap.dedent(''.join(lines)).splitlines(True)
++        return lines
+
+-    if any(s[:dedent].strip() for s in lines):
+-        logger.warning(__('non-whitespace stripped by dedent'), location=location)
+
+     new_lines = []
+     for line in lines:
+@@ -224,9 +222,9 @@ class LiteralIncludeReader:
+                        self.start_filter,
+                        self.end_filter,
+                        self.lines_filter,
++                       self.dedent_filter,
+                        self.prepend_filter,
+-                       self.append_filter,
+-                       self.dedent_filter]
++                       self.append_filter]
+             lines = self.read_file(self.filename, location=location)
+             for func in filters:
+                 lines = func(lines, location=location)

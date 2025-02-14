@@ -1,0 +1,81 @@
+diff --git a/django/contrib/admin/views/autocomplete.py b/django/contrib/admin/views/autocomplete.py
+index 3903e4c98c..dc795c3db0 100644
+--- a/django/contrib/admin/views/autocomplete.py
++++ b/django/contrib/admin/views/autocomplete.py
+@@ -32,8 +32,6 @@ class AutocompleteJsonView(BaseListView):
+             'pagination': {'more': context['page_obj'].has_next()},
+         })
+
+-    def get_paginator(self, *args, **kwargs):
+-        """Use the ModelAdmin's paginator."""
+         return self.model_admin.get_paginator(self.request, *args, **kwargs)
+
+     def get_queryset(self):
+diff --git a/scripts/reproduce_error.py b/scripts/reproduce_error.py
+new file mode 100644
+index 0000000000..ca59b0eb57
+--- /dev/null
++++ b/scripts/reproduce_error.py
+@@ -0,0 +1,61 @@
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.urls import path
++from django.http import JsonResponse
++from django.core.management import execute_from_command_line
++from django.conf import settings
++from django.db import models
++from django.apps import apps
++
++# Minimal Django setup
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    INSTALLED_APPS=[
++        'django.contrib.admin',
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++class MyModel(models.Model):
++    name = models.CharField(max_length=100)
++    notes = models.TextField()
++
++    def __str__(self):
++        return self.name
++
++class CustomAutocompleteJsonView(AutocompleteJsonView):
++    def get(self, request, *args, **kwargs):
++        self.term, self.model_admin, self.source_field, to_field_name = self.process_request(request)
++        if not self.has_perm(request):
++            raise PermissionDenied
++        self.object_list = self.get_queryset()
++        context = self.get_context_data()
++        return JsonResponse({
++            'results': [
++                {'id': str(getattr(obj, to_field_name)), 'text': str(obj), 'notes': obj.notes}
++                for obj in context['object_list']
++            ],
++            'pagination': {'more': context['page_obj'].has_next()},
++        })
++
++urlpatterns = [
++    path('autocomplete/', CustomAutocompleteJsonView.as_view()),
++]
++
++def run():
++    import django
++    django.setup()
++    # Create test data
++    MyModel.objects.create(name='Item 1', notes='Note 1')
++    MyModel.objects.create(name='Item 2', notes='Note 2')
++    execute_from_command_line(['manage.py', 'runserver', '8000'])
++
++if __name__ == '__main__':
++    run()
+\ No newline at end of file

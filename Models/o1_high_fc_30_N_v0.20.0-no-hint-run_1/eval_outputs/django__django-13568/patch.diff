@@ -1,0 +1,120 @@
+diff --git a/django/contrib/auth/checks.py b/django/contrib/auth/checks.py
+index 65fc266f7e..d567bacce4 100644
+--- a/django/contrib/auth/checks.py
++++ b/django/contrib/auth/checks.py
+@@ -51,13 +51,17 @@ def check_user_model(app_configs=None, **kwargs):
+             )
+         )
+
+-    # Check that the username field is unique
+-    if not cls._meta.get_field(cls.USERNAME_FIELD).unique:
++    # Check that the username field is unique or included in a UniqueConstraint
++    check_for_unique_constraint = any(
++        getattr(c, 'fields', None) and cls.USERNAME_FIELD in c.fields
++        for c in cls._meta.constraints
++    )
++    if not cls._meta.get_field(cls.USERNAME_FIELD).unique and not check_for_unique_constraint:
+         if (settings.AUTHENTICATION_BACKENDS ==
+                 ['django.contrib.auth.backends.ModelBackend']):
+             errors.append(
+                 checks.Error(
+-                    "'%s.%s' must be unique because it is named as the 'USERNAME_FIELD'." % (
++                    "'%s.%s' must be unique, or be included in a UniqueConstraint, because it is named as the 'USERNAME_FIELD'." % (
+                         cls._meta.object_name, cls.USERNAME_FIELD
+                     ),
+                     obj=cls,
+@@ -67,7 +71,7 @@ def check_user_model(app_configs=None, **kwargs):
+         else:
+             errors.append(
+                 checks.Warning(
+-                    "'%s.%s' is named as the 'USERNAME_FIELD', but it is not unique." % (
++                    "'%s.%s' is named as the 'USERNAME_FIELD', but it isn't unique or included in a UniqueConstraint." % (
+                         cls._meta.object_name, cls.USERNAME_FIELD
+                     ),
+                     hint='Ensure that your authentication backend(s) can handle non-unique usernames.',
+diff --git a/repro_app/__init__.py b/repro_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/repro_app/models.py b/repro_app/models.py
+new file mode 100644
+index 0000000000..3120110d18
+--- /dev/null
++++ b/repro_app/models.py
+@@ -0,0 +1,12 @@
++from django.db import models
++from django.contrib.auth.models import AbstractBaseUser
++from django.db.models import UniqueConstraint
++
++class User(AbstractBaseUser):
++    username = models.CharField(max_length=30)
++    USERNAME_FIELD = "username"
++
++    class Meta:
++        constraints = [
++            UniqueConstraint(fields=["username"], name="user_username_unq"),
++        ]
+diff --git a/repro_authE003.py b/repro_authE003.py
+new file mode 100644
+index 0000000000..646dddb032
+--- /dev/null
++++ b/repro_authE003.py
+@@ -0,0 +1,59 @@
++import os
++import django
++from django.conf import settings
++from django.core.management import call_command
++
++# Minimal Django settings for our test.
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++settings.configure(
++    SECRET_KEY='testsecretkey',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'repro_app',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': os.path.join(BASE_DIR, 'testdb.sqlite3'),
++        }
++    },
++    MIDDLEWARE=[],
++    ROOT_URLCONF=__name__,
++)
++
++os.makedirs(os.path.join(BASE_DIR, 'repro_app'), exist_ok=True)
++
++# We'll create the app's models in memory.
++with open(os.path.join(BASE_DIR, 'repro_app', '__init__.py'), 'w') as f:
++    f.write('')
++
++models_code = '''\
++from django.db import models
++from django.contrib.auth.models import AbstractBaseUser
++from django.db.models import UniqueConstraint
++
++class User(AbstractBaseUser):
++    username = models.CharField(max_length=30)
++    USERNAME_FIELD = "username"
++
++    class Meta:
++        constraints = [
++            UniqueConstraint(fields=["username"], name="user_username_unq"),
++        ]
++'''
++
++with open(os.path.join(BASE_DIR, 'repro_app', 'models.py'), 'w') as f:
++    f.write(models_code)
++
++# Now let's setup Django and run the check.
++
++urlpatterns = []
++
++def main():
++    django.setup()
++    call_command('check')
++
++if __name__ == '__main__':
++    main()

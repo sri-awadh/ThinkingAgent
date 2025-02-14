@@ -1,0 +1,160 @@
+diff --git a/django/db/models/constraints.py b/django/db/models/constraints.py
+index 075ecee1be..1dc5771431 100644
+--- a/django/db/models/constraints.py
++++ b/django/db/models/constraints.py
+@@ -20,9 +20,12 @@ class BaseConstraint:
+     default_violation_error_message = _("Constraint “%(name)s” is violated.")
+     violation_error_message = None
+
++    default_violation_error_code = 'constraint_violated'
++    violation_error_code = None
++
+     # RemovedInDjango60Warning: When the deprecation ends, replace with:
+     # def __init__(self, *, name, violation_error_message=None):
+-    def __init__(self, *args, name=None, violation_error_message=None):
++    def __init__(self, *args, name=None, violation_error_message=None, violation_error_code=None):
+         # RemovedInDjango60Warning.
+         if name is None and not args:
+             raise TypeError(
+@@ -34,6 +37,11 @@ class BaseConstraint:
+             self.violation_error_message = violation_error_message
+         else:
+             self.violation_error_message = self.default_violation_error_message
++
++        if violation_error_code is not None:
++            self.violation_error_code = violation_error_code
++        else:
++            self.violation_error_code = self.default_violation_error_code
+         # RemovedInDjango60Warning.
+         if args:
+             warnings.warn(
+@@ -62,6 +70,9 @@ class BaseConstraint:
+     def validate(self, model, instance, exclude=None, using=DEFAULT_DB_ALIAS):
+         raise NotImplementedError("This method must be implemented by a subclass.")
+
++    def get_violation_error_code(self):
++        return self.violation_error_code or self.default_violation_error_code
++
+     def get_violation_error_message(self):
+         return self.violation_error_message % {"name": self.name}
+
+@@ -82,7 +93,7 @@ class BaseConstraint:
+
+
+ class CheckConstraint(BaseConstraint):
+-    def __init__(self, *, check, name, violation_error_message=None):
++    def __init__(self, *, check, name, violation_error_message=None, violation_error_code=None):
+         self.check = check
+         if not getattr(check, "conditional", False):
+             raise TypeError(
+@@ -112,7 +123,7 @@ class CheckConstraint(BaseConstraint):
+         against = instance._get_field_value_map(meta=model._meta, exclude=exclude)
+         try:
+             if not Q(self.check).check(against, using=using):
+-                raise ValidationError(self.get_violation_error_message())
++                raise ValidationError(self.get_violation_error_message(), code=self.get_violation_error_code())
+         except FieldError:
+             pass
+
+@@ -164,6 +175,7 @@ class UniqueConstraint(BaseConstraint):
+         include=None,
+         opclasses=(),
+         violation_error_message=None,
++        violation_error_code=None,
+     ):
+         if not name:
+             raise ValueError("A unique constraint must be named.")
+@@ -385,7 +397,7 @@ class UniqueConstraint(BaseConstraint):
+         if not self.condition:
+             if queryset.exists():
+                 if self.expressions:
+-                    raise ValidationError(self.get_violation_error_message())
++                    raise ValidationError(self.get_violation_error_message(), code=self.get_violation_error_code())
+                 # When fields are defined, use the unique_error_message() for
+                 # backward compatibility.
+                 for model, constraints in instance.get_constraints():
+@@ -400,6 +412,6 @@ class UniqueConstraint(BaseConstraint):
+                 if (self.condition & Exists(queryset.filter(self.condition))).check(
+                     against, using=using
+                 ):
+-                    raise ValidationError(self.get_violation_error_message())
++                    raise ValidationError(self.get_violation_error_message(), code=self.get_violation_error_code())
+             except FieldError:
+                 pass
+diff --git a/repro_script.py b/repro_script.py
+new file mode 100644
+index 0000000000..37db0f3b5f
+--- /dev/null
++++ b/repro_script.py
+@@ -0,0 +1,71 @@
++import sys, os
++
++# Insert the local Django repo to sys.path
++sys.path.insert(0, '/workspace/django__django__5.0')
++
++import django
++from django.conf import settings
++
++# Configure a minimal Django settings for our test
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'reproapp',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import connections
++from django.db import models
++from django.core.exceptions import ValidationError
++
++# Create a simple app_label so the model is recognized by Django
++class MyModel(models.Model):
++    myfield = models.CharField(max_length=255)
++
++    class Meta:
++        app_label = 'reproapp'
++        constraints = [
++            models.UniqueConstraint(
++                fields=['myfield'],
++                name='unique_mymodel_myfield',
++                violation_error_message='some msg',
++                # Attempt to specify a custom code here:
++                violation_error_code='my_unique_code'
++            )
++        ]
++
++def main():
++    # Create the table in the test in-memory database.
++    with connections['default'].schema_editor() as schema_editor:
++        schema_editor.create_model(MyModel)
++
++    # First object.
++    obj1 = MyModel(myfield='duplicate')
++    obj1.full_clean()
++    obj1.save()
++
++    # Second object with the same myfield => triggers a uniqueness constraint.
++    obj2 = MyModel(myfield='duplicate')
++    try:
++        obj2.full_clean()
++    except ValidationError as e:
++        print('ValidationError caught as expected:')
++        print('message_dict:', e.message_dict)
++        # Checking if the "code" attribute is recognized.
++        if hasattr(e, 'code'):
++            print('code:', e.code)
++        else:
++            print('No code attribute found in ValidationError!')
++
++if __name__ == '__main__':
++    main()

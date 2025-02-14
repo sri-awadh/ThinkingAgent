@@ -1,0 +1,174 @@
+diff --git a/django/db/models/fields/files.py b/django/db/models/fields/files.py
+index 7f8eb128e1..6fb3e46636 100644
+--- a/django/db/models/fields/files.py
++++ b/django/db/models/fields/files.py
+@@ -440,8 +440,8 @@ class ImageField(FileField):
+         # Attach update_dimension_fields so that dimension fields declared
+         # after their corresponding image field don't stay cleared by
+         # Model.__init__, see bug #11196.
+-        # Only run post-initialization dimension update on non-abstract models
+-        if not cls._meta.abstract:
++        # Only run post-initialization dimension update on non-abstract models if width_field or height_field are set
++        if not cls._meta.abstract and (self.width_field or self.height_field):
+             signals.post_init.connect(self.update_dimension_fields, sender=cls)
+
+     def update_dimension_fields(self, instance, force=False, *args, **kwargs):
+diff --git a/mytestapp/__init__.py b/mytestapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/mytestapp/apps.py b/mytestapp/apps.py
+new file mode 100644
+index 0000000000..89484505c2
+--- /dev/null
++++ b/mytestapp/apps.py
+@@ -0,0 +1,5 @@
++from django.apps import AppConfig
++
++class MyTestAppConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'mytestapp'
+diff --git a/mytestapp/models.py b/mytestapp/models.py
+new file mode 100644
+index 0000000000..d941a0b3d5
+--- /dev/null
++++ b/mytestapp/models.py
+@@ -0,0 +1,4 @@
++from django.db import models
++
++class TestImageModel(models.Model):
++    image = models.ImageField(upload_to='test_images/')
+\ No newline at end of file
+diff --git a/reproduce_imagefield_post_init_issue.py b/reproduce_imagefield_post_init_issue.py
+new file mode 100644
+index 0000000000..ec09cc598f
+--- /dev/null
++++ b/reproduce_imagefield_post_init_issue.py
+@@ -0,0 +1,68 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.apps import apps
++from django.core.management import execute_from_command_line
++import sys
++
++# We'll define minimal settings inline.
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        '__main__',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    SECRET_KEY='secretkey',
++    USE_TZ=True,
++
++    MIGRATION_MODULES={'__main__': None},
++
++)
++
++django.setup()
++
++class TestImageModel(models.Model):
++    # We'll define an ImageField without width/height fields to replicate the overhead.
++    image = models.ImageField(upload_to='test_images/')
++
++# Register the model.
++apps.register_model(__name__, TestImageModel)
++
++
++# We'll track how many times post_init is called.
++from django.db.models.signals import post_init
++
++POST_INIT_COUNT = 0
++
++def custom_post_init(sender, **kwargs):
++    global POST_INIT_COUNT
++    POST_INIT_COUNT += 1
++
++post_init.connect(custom_post_init, sender=TestImageModel)
++
++
++def main():
++    global POST_INIT_COUNT
++    # Migrate the in-memory db.
++    execute_from_command_line([sys.argv[0], 'migrate', '--run-syncdb'])
++
++    POST_INIT_COUNT = 0
++    # Create some objects.
++    objs = [TestImageModel() for _ in range(10000)]
++    TestImageModel.objects.bulk_create(objs)
++
++    # Reset the counter and fetch them from DB.
++    POST_INIT_COUNT = 0
++    fetched_objs = list(TestImageModel.objects.all())
++
++    print(f"Fetched {len(fetched_objs)} objects")
++    print(f"post_init signal called {POST_INIT_COUNT} times.")
++
++if __name__ == '__main__':
++    main()
+diff --git a/reproduce_imagefield_post_init_issue2.py b/reproduce_imagefield_post_init_issue2.py
+new file mode 100644
+index 0000000000..c2fc3f89a1
+--- /dev/null
++++ b/reproduce_imagefield_post_init_issue2.py
+@@ -0,0 +1,54 @@
++import django
++from django.conf import settings
++from django.core.management import execute_from_command_line
++import sys
++
++# Configure minimal settings for our test app.
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'mytestapp',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    SECRET_KEY='secretkey',
++    USE_TZ=True,
++    MIGRATION_MODULES={'mytestapp': None},  # So we can use --run-syncdb
++)
++
++django.setup()
++
++from mytestapp.models import TestImageModel
++from django.db.models.signals import post_init
++
++POST_INIT_COUNT = 0
++
++def custom_post_init(sender, **kwargs):
++    global POST_INIT_COUNT
++    POST_INIT_COUNT += 1
++
++post_init.connect(custom_post_init, sender=TestImageModel)
++
++def main():
++    global POST_INIT_COUNT
++    # Migrate the in-memory DB.
++    execute_from_command_line([sys.argv[0], 'migrate', '--run-syncdb'])
++
++    # Create a bunch of objects.
++    objs = [TestImageModel() for _ in range(10000)]
++    TestImageModel.objects.bulk_create(objs)
++
++    # Reset the counter and fetch them from DB.
++    POST_INIT_COUNT = 0
++    fetched_objs = list(TestImageModel.objects.all())
++
++    print(f"Fetched {len(fetched_objs)} objects.")
++    print(f"post_init signal called {POST_INIT_COUNT} times.")
++
++if __name__ == '__main__':
++    main()

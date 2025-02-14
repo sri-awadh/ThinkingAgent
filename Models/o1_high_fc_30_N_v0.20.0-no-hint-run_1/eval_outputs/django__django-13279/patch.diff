@@ -1,0 +1,127 @@
+diff --git a/django/contrib/sessions/backends/base.py b/django/contrib/sessions/backends/base.py
+index b5453160a5..5cd872d72c 100644
+--- a/django/contrib/sessions/backends/base.py
++++ b/django/contrib/sessions/backends/base.py
+@@ -108,18 +108,58 @@ class SessionBase:
+
+     def encode(self, session_dict):
+         "Return the given session dictionary serialized and encoded as a string."
+-        return signing.dumps(
+-            session_dict, salt=self.key_salt, serializer=self.serializer,
+-            compress=True,
+-        )
++        from django.conf import settings
++        from django.core import signing
++        import base64
++        if settings.DEFAULT_HASHING_ALGORITHM == 'sha1':
++            serialized = self.serializer().dumps(session_dict)
++            hash_val = self._hash(serialized)
++            return base64.b64encode(hash_val.encode() + b':' + serialized).decode('ascii')
++        else:
++            return signing.dumps(
++                session_dict, salt=self.key_salt, serializer=self.serializer,
++                compress=True,
++            )
++        from django.conf import settings
++        import base64
++        if settings.DEFAULT_HASHING_ALGORITHM == 'sha1':
++            serialized = self.serializer().dumps(session_dict)
++            hash_val = self._hash(serialized)
++            return base64.b64encode(hash_val.encode() + b':' + serialized).decode('ascii')
++        else:
++            return signing.dumps(
++                session_dict, salt=self.key_salt, serializer=self.serializer,
++                compress=True,
++            )
+
+     def decode(self, session_data):
+-        try:
+-            return signing.loads(session_data, salt=self.key_salt, serializer=self.serializer)
+-        # RemovedInDjango40Warning: when the deprecation ends, handle here
+-        # exceptions similar to what _legacy_decode() does now.
+-        except Exception:
+-            return self._legacy_decode(session_data)
++        from django.conf import settings
++        from django.core.signing import BadSignature
++        from django.core import signing
++        import binascii
++
++        def try_legacy(s):
++            try:
++                return self._legacy_decode(s)
++            except:
++                return {}
++
++        def try_sign(s):
++            try:
++                return signing.loads(s, salt=self.key_salt, serializer=self.serializer)
++            except (BadSignature, binascii.Error, ValueError):
++                return {}
++
++        if settings.DEFAULT_HASHING_ALGORITHM == 'sha1':
++            data = try_legacy(session_data)
++            if data:
++                return data
++            return try_sign(session_data)
++        else:
++            data = try_sign(session_data)
++            if data:
++                return data
++            return try_legacy(session_data)
+
+     def _legacy_decode(self, session_data):
+         # RemovedInDjango40Warning: pre-Django 3.1 format will be invalid.
+diff --git a/reproduce_session_error.py b/reproduce_session_error.py
+new file mode 100644
+index 0000000000..08e94b3fcc
+--- /dev/null
++++ b/reproduce_session_error.py
+@@ -0,0 +1,48 @@
++import os
++import sys
++
++# We’ll do a small script that sets DEFAULT_HASHING_ALGORITHM to 'sha1' and then
++# tries to encode/decode some session data as if it were from Django 3.1’s new format.
++# If we haven’t patched the code to handle old sessions properly, we should see an error.
++
++import django
++from django.conf import settings
++
++# Ensure Django is configured.
++
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[],
++        SECRET_KEY='testsecretkey',
++        DEFAULT_HASHING_ALGORITHM='sha1',
++        SESSION_SERIALIZER='django.contrib.sessions.serializers.PickleSerializer',
++    )
++
++from django.contrib.sessions.backends.base import SessionBase
++
++def main():
++    session = SessionBase()
++
++    # Simulate data that might have been encoded with the new (post-3.1) approach.
++    # If our code always tries to do legacy decode when sha1, it might fail.
++
++    # Force the new style encoding (pretend we had code from when algorithm was 'sha256')
++    # For that, we patch settings temporarily.
++    old_alg = settings.DEFAULT_HASHING_ALGORITHM
++    settings.DEFAULT_HASHING_ALGORITHM = 'sha256'
++    new_format_data = session.encode({"test": "value"})  # encoded with new style
++    settings.DEFAULT_HASHING_ALGORITHM = old_alg
++
++    # Now decode the data with the current code, which is using sha1.
++    try:
++        decoded = session.decode(new_format_data)
++        print("Successfully decoded session data:", decoded)
++    except Exception as e:
++        print("ERROR: Could not decode session data.", e)
++        sys.exit(1)
++
++    sys.exit(0)
++
++
++if __name__ == '__main__':
++    main()

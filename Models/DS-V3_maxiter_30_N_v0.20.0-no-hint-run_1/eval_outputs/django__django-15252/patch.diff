@@ -1,0 +1,54 @@
+diff --git a/default.db b/default.db
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..3c0ca264ec 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -62,12 +62,40 @@ class MigrationRecorder:
+         # in the codebase.
+         if self.has_table():
+             return
+-        # Make the table
+-        try:
+-            with self.connection.schema_editor() as editor:
+-                editor.create_model(self.Migration)
+-        except DatabaseError as exc:
+-            raise MigrationSchemaMissing("Unable to create the django_migrations table (%s)" % exc)
++
++        # Check if migrations are allowed on this database
++        router = self.connection.router
++        if hasattr(router, 'allow_migrate'):
++            if not router.allow_migrate(self.connection.alias, self.Migration):
++                return
++
++        # Handle SQLite specially
++        if self.connection.vendor == 'sqlite':
++            # Create a custom schema editor context
++            from django.db.backends.sqlite3.schema import DatabaseSchemaEditor
++            class CustomSchemaEditor(DatabaseSchemaEditor):
++                def __enter__(self):
++                    with self.connection.cursor() as cursor:
++                        cursor.execute('PRAGMA foreign_keys=OFF')
++                    return super().__enter__()
++
++                def __exit__(self, exc_type, exc_value, traceback):
++                    super().__exit__(exc_type, exc_value, traceback)
++                    with self.connection.cursor() as cursor:
++                        cursor.execute('PRAGMA foreign_keys=ON')
++
++            try:
++                with CustomSchemaEditor(self.connection) as editor:
++                    editor.create_model(self.Migration)
++            except DatabaseError as exc:
++                raise MigrationSchemaMissing(f"Unable to create the django_migrations table ({exc})")
++        else:
++            # For other databases, use the schema editor
++            try:
++                with self.connection.schema_editor() as editor:
++                    editor.create_model(self.Migration)
++            except DatabaseError as exc:
++                raise MigrationSchemaMissing("Unable to create the django_migrations table (%s)" % exc)
+
+     def applied_migrations(self):
+         """

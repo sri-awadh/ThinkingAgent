@@ -1,0 +1,246 @@
+diff --git a/bug_repro.py b/bug_repro.py
+new file mode 100644
+index 0000000000..8b90d86ac8
+--- /dev/null
++++ b/bug_repro.py
+@@ -0,0 +1,105 @@
++import os, shutil, subprocess, sys
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++TESTPROJECT_DIR = os.path.join(BASE_DIR, 'testproj')
++MGMT_PY = os.path.join(TESTPROJECT_DIR, 'manage.py')
++
++REPO_CLEANED = False
++
++def run_cmd(cmd, cwd=None, input_str=None):
++    print(f"Running command: {cmd} (cwd={cwd})")
++    if input_str:
++        result = subprocess.run(cmd, shell=True, cwd=cwd, input=input_str.encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
++    else:
++        result = subprocess.run(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
++    output = result.stdout.decode()
++    print(output)
++    return result.returncode, output
++
++def setup_test_project():
++    global REPO_CLEANED
++    if os.path.exists(TESTPROJECT_DIR):
++        shutil.rmtree(TESTPROJECT_DIR)
++    os.makedirs(TESTPROJECT_DIR)
++    # create minimal django project
++    # we rely on the local django in editable mode
++
++    # Create a minimal settings file
++    with open(os.path.join(TESTPROJECT_DIR, 'settings.py'), 'w') as f:
++        f.write("""\
++SECRET_KEY = 'dummykey'\n
++INSTALLED_APPS = [\n    'django.contrib.contenttypes',\n    'django.contrib.auth',\n    'test_one',\n]\n
++DATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.sqlite3',\n        'NAME': ':memory:',\n    }\n}\n
++ROOT_URLCONF = 'urls'
++""")
++
++    # Create minimal urls.py
++    with open(os.path.join(TESTPROJECT_DIR, 'urls.py'), 'w') as f:
++        f.write('urlpatterns = []\n')
++
++    # Create manage.py
++    manage_py = f"""\
++#!/usr/bin/env python
++import os, sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'settings')
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
++"""
++    with open(MGMT_PY, 'w') as f:
++        f.write(manage_py)
++    os.chmod(MGMT_PY, 0o755)
++
++    # Manually create test_one
++    test_one_dir = os.path.join(TESTPROJECT_DIR, "test_one")
++    os.makedirs(test_one_dir)
++    open(os.path.join(test_one_dir, "__init__.py"), "w").close()
++    apps_py = """from django.apps import AppConfig\nclass TestOneConfig(AppConfig):\n    name = 'test_one'\n"""
++    with open(os.path.join(test_one_dir, "apps.py"), "w") as f:
++        f.write(apps_py)
++    # Create models.py with MyModel
++    models_contents = """\
++from django.db import models
++
++class MyModel(models.Model):
++    name = models.CharField(max_length=100)
++"""
++    test_one_models = os.path.join(TESTPROJECT_DIR, 'test_one', 'models.py')
++    with open(test_one_models, 'w') as f:
++        f.write(models_contents)
++
++
++def step1_make_initial_migration():
++    # run makemigrations
++    returncode, output = run_cmd(f"{sys.executable} {MGMT_PY} makemigrations test_one", cwd=TESTPROJECT_DIR)
++
++
++def step2_rename_model_and_field():
++    # Modify models.py so that MyModel -> MyModel2, name -> title
++    test_one_models = os.path.join(TESTPROJECT_DIR, 'test_one', 'models.py')
++    with open(test_one_models, 'r') as f:
++        old = f.read()
++    new = old.replace('MyModel', 'MyModel2').replace('name', 'title')
++    with open(test_one_models, 'w') as f:
++        f.write(new)
++
++
++def step3_makemigrations_with_rename():
++    # This typically triggers the prompt about rename
++    # We'll pipe 'y' so that the autodetector sees the rename modeling
++    cmd = f"(echo yes; echo yes) | {sys.executable} {MGMT_PY} makemigrations test_one"
++    return run_cmd(cmd, cwd=TESTPROJECT_DIR)
++
++if __name__ == '__main__':
++    setup_test_project()
++    print("\n=== Step 1: Make initial migration ===")
++    step1_make_initial_migration()
++    print("\n=== Step 2: Rename model and field ===")
++    step2_rename_model_and_field()
++    print("\n=== Step 3: Make migrations with rename ===")
++    ret, out = step3_makemigrations_with_rename()
++    if ret != 0:
++        print("\nThe script ended with a non-zero exit code, indicating potential error.")
++    else:
++        print("\nThe script ended with exit code 0 - maybe no error.")
+diff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py
+index bf9c2acd26..f1238a3504 100644
+--- a/django/db/migrations/autodetector.py
++++ b/django/db/migrations/autodetector.py
+@@ -824,7 +824,7 @@ class MigrationAutodetector:
+         for app_label, model_name, field_name in sorted(self.new_field_keys - self.old_field_keys):
+             old_model_name = self.renamed_models.get((app_label, model_name), model_name)
+             old_model_state = self.from_state.models[app_label, old_model_name]
+-            new_model_state = self.to_state.models[app_label, old_model_name]
++            new_model_state = self.to_state.models[app_label, model_name]
+             field = new_model_state.get_field(field_name)
+             # Scan to see if this is actually a rename!
+             field_dec = self.deep_deconstruct(field)
+diff --git a/testproj/manage.py b/testproj/manage.py
+new file mode 100755
+index 0000000000..ff552328c5
+--- /dev/null
++++ b/testproj/manage.py
+@@ -0,0 +1,7 @@
++#!/usr/bin/env python
++import os, sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'settings')
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
+diff --git a/testproj/settings.py b/testproj/settings.py
+new file mode 100644
+index 0000000000..c2b6a42da1
+--- /dev/null
++++ b/testproj/settings.py
+@@ -0,0 +1,16 @@
++SECRET_KEY = 'dummykey'
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_one',
++]
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++ROOT_URLCONF = 'urls'
+diff --git a/testproj/test_one/__init__.py b/testproj/test_one/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testproj/test_one/apps.py b/testproj/test_one/apps.py
+new file mode 100644
+index 0000000000..b54cad7b5d
+--- /dev/null
++++ b/testproj/test_one/apps.py
+@@ -0,0 +1,3 @@
++from django.apps import AppConfig
++class TestOneConfig(AppConfig):
++    name = 'test_one'
+diff --git a/testproj/test_one/migrations/0001_initial.py b/testproj/test_one/migrations/0001_initial.py
+new file mode 100644
+index 0000000000..ed8b1d7f12
+--- /dev/null
++++ b/testproj/test_one/migrations/0001_initial.py
+@@ -0,0 +1,21 @@
++# Generated by Django 4.1.dev20220131103324 on 2025-01-13 19:32
++
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++
++    initial = True
++
++    dependencies = [
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name='MyModel',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
+diff --git a/testproj/test_one/migrations/0002_rename_mymodel_mymodel2_rename_name_mymodel2_title.py b/testproj/test_one/migrations/0002_rename_mymodel_mymodel2_rename_name_mymodel2_title.py
+new file mode 100644
+index 0000000000..04ad108c53
+--- /dev/null
++++ b/testproj/test_one/migrations/0002_rename_mymodel_mymodel2_rename_name_mymodel2_title.py
+@@ -0,0 +1,22 @@
++# Generated by Django 4.1.dev20220131103324 on 2025-01-13 19:32
++
++from django.db import migrations
++
++
++class Migration(migrations.Migration):
++
++    dependencies = [
++        ('test_one', '0001_initial'),
++    ]
++
++    operations = [
++        migrations.RenameModel(
++            old_name='MyModel',
++            new_name='MyModel2',
++        ),
++        migrations.RenameField(
++            model_name='mymodel2',
++            old_name='name',
++            new_name='title',
++        ),
++    ]
+diff --git a/testproj/test_one/migrations/__init__.py b/testproj/test_one/migrations/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testproj/test_one/models.py b/testproj/test_one/models.py
+new file mode 100644
+index 0000000000..fd86ea7905
+--- /dev/null
++++ b/testproj/test_one/models.py
+@@ -0,0 +1,4 @@
++from django.db import models
++
++class MyModel2(models.Model):
++    title = models.CharField(max_length=100)
+diff --git a/testproj/urls.py b/testproj/urls.py
+new file mode 100644
+index 0000000000..637600f58a
+--- /dev/null
++++ b/testproj/urls.py
+@@ -0,0 +1 @@
++urlpatterns = []
