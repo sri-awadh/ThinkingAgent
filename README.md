@@ -83,19 +83,24 @@ analyze_responses("path/to/interactions", iteration_number=None)
 
 # Results
 
-Our framework evaluates overthinking across different models and tasks:
+Our framework has been used to analyze 4,018 trajectories from various models performing software engineering tasks. Key findings from our research:
 
-| Model | Analysis Paralysis | Rogue Actions | Premature Disengagement | Overall Score |
-|-------|-------------------|---------------|------------------------|---------------|
-| Model A | 3.2 | 2.8 | 1.5 | 2.5 |
-| Model B | 6.7 | 5.4 | 4.2 | 5.4 |
-| Model C | 8.9 | 7.6 | 9.1 | 8.5 |
+1. **Performance Impact**:
+   - Higher overthinking scores strongly correlate with decreased performance
+   - Selecting solutions with lower overthinking scores improves model performance by ~30%
+   - Computational costs can be reduced by 43% through overthinking mitigation
 
-Key findings:
-- Models tend to overthink more in complex reasoning tasks
-- Analysis paralysis is more common in mathematical problems
-- Rogue actions increase after encountering errors
-- Premature disengagement occurs more in open-ended tasks
+2. **Model Behavior Analysis**:
+   - Reasoning models exhibit stronger tendencies toward overthinking compared to non-reasoning models
+   - Three main patterns were identified:
+     * Analysis Paralysis: Models focus on planning instead of action
+     * Rogue Actions: Models execute multiple actions without waiting for feedback
+     * Premature Disengagement: Models conclude tasks without proper verification
+
+3. **Mitigation Strategies**:
+   - Native function-calling capabilities can help reduce overthinking
+   - Selective reinforcement learning shows promise in mitigating overthinking tendencies
+   - Simple selection of lower overthinking score solutions provides significant improvements
 
 # Citation
 
