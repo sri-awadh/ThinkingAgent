@@ -1,0 +1,73 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 5e3c7cab82..9008fdfcd8 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -88,7 +88,15 @@ class Combinable:
+         return self._combine(other, self.DIV, False)
+
+     def __mod__(self, other):
+-        return self._combine(other, self.MOD, False)
++        # Check if either operand is a DecimalField
++        if hasattr(self, 'output_field') and isinstance(self.output_field, fields.DecimalField):
++            output_field = fields.DecimalField()
++        elif hasattr(other, 'output_field') and isinstance(other.output_field, fields.DecimalField):
++            output_field = fields.DecimalField()
++        else:
++            output_field = fields.IntegerField()  # Default to IntegerField if neither is Decimal
++
++        return self._combine(other, self.MOD, False, output_field=output_field)
+
+     def __pow__(self, other):
+         return self._combine(other, self.POW, False)
+diff --git a/reproduce_mod_issue.py b/reproduce_mod_issue.py
+new file mode 100644
+index 0000000000..003a5d2b1e
+--- /dev/null
++++ b/reproduce_mod_issue.py
+@@ -0,0 +1,45 @@
++from django.db import models
++from django.conf import settings
++from django.apps import apps
++
++# Configure Django settings
++settings.configure(
++    INSTALLED_APPS=['__main__'],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++apps.populate(settings.INSTALLED_APPS)
++
++class TestModel(models.Model):
++    decimal_field = models.DecimalField(max_digits=10, decimal_places=2)
++    integer_field = models.IntegerField()
++
++    class Meta:
++        managed = False
++
++def reproduce_issue():
++    # Create database tables
++    TestModel._meta.db_table = '__main__testmodel'
++    from django.db import connections
++    with connections[TestModel.objects.db].schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++    # Create test data
++    TestModel.objects.create(decimal_field=10.5, integer_field=3)
++    TestModel.objects.create(decimal_field=15.0, integer_field=4)
++
++    # Perform MOD operation
++    queryset = TestModel.objects.annotate(
++        mod_result=models.F('decimal_field') % models.F('integer_field')
++    )
++
++    # Check the output type
++    for obj in queryset:
++        print(f"MOD Result: {obj.mod_result}")
++        print(f"Type of MOD Result: {type(obj.mod_result)}")
++
++if __name__ == '__main__':
++    reproduce_issue()
+\ No newline at end of file

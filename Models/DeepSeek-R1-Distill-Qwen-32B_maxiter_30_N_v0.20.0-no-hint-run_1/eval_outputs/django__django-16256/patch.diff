@@ -1,0 +1,162 @@
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index c5d87f647a..1742cd8d7d 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -628,6 +628,68 @@ class ReverseManyToOneDescriptor:
+
+
+ def create_reverse_many_to_one_manager(superclass, rel):
++    """
++    Creates a manager for a reverse many-to-one relationship.
++    """
++    # We need to use type() to create new classes so that we can set the __module__
++    # attribute correctly.
++    class ReverseManager(superclass):
++        def __init__(self, instance):
++            super().__init__()
++            self.instance = instance
++            self._db = None
++            self._hints = {}
++            self._source_field_name = rel.field.name
++            self._fk_val = instance._get_pk_val()
++            self._field = rel.field
++            self.model = rel.model
++
++        def _check_fk_val(self):
++            if self._fk_val is None:
++                raise ValueError(
++                    f"Cannot use {self.__class__.__name__} because the instance's primary key is None."
++                )
++
++        def get_queryset(self):
++            db = self._db or router.db_for_read(
++                self.model, instance=self.instance
++            )
++            qs = super().get_queryset()
++            qs = qs.using(db)
++            qs = qs.filter(**{rel.field.name: self._fk_val})
++            return qs
++
++        def create(self, **kwargs):
++            self._check_fk_val()
++            kwargs[self.field.name] = self.instance
++            return super().create(**kwargs)
++        create.alters_data = True
++
++        async def acreate(self, **kwargs):
++            return await sync_to_async(self.create)(**kwargs)
++        acreate.alters_data = True
++
++        async def aget_or_create(self, **kwargs):
++            return await sync_to_async(self.get_or_create)(**kwargs)
++        aget_or_create.alters_data = True
++
++        async def aupdate_or_create(self, **kwargs):
++            return await sync_to_async(self.update_or_create)(**kwargs)
++        aupdate_or_create.alters_data = True
++
++        def get_or_create(self, **kwargs):
++            self._check_fk_val()
++            kwargs[self.field.name] = self.instance
++            return super().get_or_create(**kwargs)
++        get_or_create.alters_data = True
++
++        def update_or_create(self, **kwargs):
++            self._check_fk_val()
++            kwargs[self.field.name] = self.instance
++            return super().update_or_create(**kwargs)
++        update_or_create.alters_data = True
++
++    return ReverseManager
+     """
+     Create a manager for the reverse side of a many-to-one relation.
+
+@@ -939,6 +1001,89 @@ class ManyToManyDescriptor(ReverseManyToOneDescriptor):
+
+
+ def create_forward_many_to_many_manager(superclass, rel, reverse):
++    """
++    Creates a manager for a forward many-to-many relationship.
++    """
++    class ManyRelatedManager(superclass):
++        def __init__(self, instance):
++            super().__init__()
++            self.instance = instance
++            self._db = None
++            self._hints = {}
++            self._field = rel.field
++            self.model = rel.model
++            self.symmetrical = rel.symmetrical
++            self.rel = rel
++            self.reverse = reverse
++
++        def _check_fk_val(self):
++            if self.instance._get_pk_val() is None:
++                raise ValueError(
++                    f"Cannot use {self.__class__.__name__} because the instance's primary key is None."
++                )
++
++        def get_queryset(self):
++            db = self._db or router.db_for_read(
++                self.model, instance=self.instance
++            )
++            qs = super().get_queryset()
++            qs = qs.using(db)
++            return qs
++
++        def create(self, **kwargs):
++            self._check_fk_val()
++            if self.reverse:
++                kwargs[self.field.name] = self.instance
++            else:
++                kwargs[self.field.related_field.name] = self.instance
++            return super().create(**kwargs)
++        create.alters_data = True
++
++        async def acreate(self, **kwargs):
++            return await sync_to_async(self.create)(**kwargs)
++        acreate.alters_data = True
++
++        async def aget_or_create(self, **kwargs):
++            return await sync_to_async(self.get_or_create)(**kwargs)
++        aget_or_create.alters_data = True
++
++        async def aupdate_or_create(self, **kwargs):
++            return await sync_to_async(self.update_or_create)(**kwargs)
++        aupdate_or_create.alters_data = True
++
++        def get_or_create(self, *, through_defaults=None, **kwargs):
++            self._check_fk_val()
++            if through_defaults is None:
++                through_defaults = {}
++            if self.reverse:
++                kwargs[self.field.name] = self.instance
++            else:
++                kwargs[self.field.related_field.name] = self.instance
++            db = router.db_for_write(
++                self.through, instance=self.instance
++            )
++            return super(ManyRelatedManager, self.db_manager(db)).get_or_create(
++                through_defaults=through_defaults, **kwargs
++            )
++        get_or_create.alters_data = True
++
++        def update_or_create(self, *, through_defaults=None, **kwargs):
++            self._check_fk_val()
++            if through_defaults is None:
++                through_defaults = {}
++            if self.reverse:
++                kwargs[self.field.name] = self.instance
++            else:
++                kwargs[self.field.related_field.name] = self.instance
++            db = router.db_for_write(
++                self.through, instance=self.instance
++            )
++            return super(ManyRelatedManager, self.db_manager(db)).update_or_create(
++                through_defaults=through_defaults, **kwargs
++            )
++        update_or_create.alters_data = True
++
++    return ManyRelatedManager
+     """
+     Create a manager for the either side of a many-to-many relation.

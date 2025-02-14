@@ -1,0 +1,108 @@
+diff --git a/django/db/migrations/executor.py b/django/db/migrations/executor.py
+index 57042a8690..0464fcced7 100644
+--- a/django/db/migrations/executor.py
++++ b/django/db/migrations/executor.py
+@@ -256,6 +256,9 @@ class MigrationExecutor:
+                 self.recorder.record_unapplied(app_label, name)
+         else:
+             self.recorder.record_unapplied(migration.app_label, migration.name)
++        # Additionally, if this is a squashed migration, mark it as unapplied
++        if migration.is_squashed:
++            self.recorder.record_unapplied(migration.app_label, migration.name)
+         # Report progress
+         if self.progress_callback:
+             self.progress_callback("unapply_success", migration, fake)
+diff --git a/reproduce_squashed_migration_issue.py b/reproduce_squashed_migration_issue.py
+new file mode 100644
+index 0000000000..bdcfe5a15f
+--- /dev/null
++++ b/reproduce_squashed_migration_issue.py
+@@ -0,0 +1,87 @@
++import os
++import sys
++from django.core.management import call_command
++from django.db import models
++from django.apps import AppConfig
++from django.conf import settings
++
++class TestAppConfig(AppConfig):
++    name = 'testapp'
++    verbose_name = "Test App"
++
++class TestModel(models.Model):
++    text = models.CharField(max_length=200)
++
++def main():
++    # Create a temporary directory for the test project
++    project_dir = 'test_project'
++    os.makedirs(project_dir, exist_ok=True)
++    os.chdir(project_dir)
++
++    # Create settings.py
++    settings.configure(
++        SECRET_KEY='django-insecure',
++        ROOT_URLCONF='test_project.urls',
++        INSTALLED_APPS=[
++            'django.contrib.admin',
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++            'testapp.apps.TestAppConfig',
++        ],
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': 'db.sqlite3',
++            }
++        },
++    )
++
++    # Create testapp directory
++    os.makedirs('testapp/models', exist_ok=True)
++    with open('testapp/models/__init__.py', 'w') as f:
++        f.write('')
++
++    # Create testapp/models.py
++    with open('testapp/models.py', 'w') as f:
++        f.write('from .models import TestModel')
++
++    # Create testapp/models/models.py
++    with open('testapp/models/models.py', 'w') as f:
++        f.write('from django.db import models\n\nclass TestModel(models.Model):\n    text = models.CharField(max_length=200)')
++
++    # Create testapp/apps.py
++    with open('testapp/apps.py', 'w') as f:
++        f.write('from django.apps import AppConfig\n\nclass TestAppConfig(AppConfig):\n    name = "testapp"\n    verbose_name = "Test App"')
++
++    # Create manage.py
++    with open('manage.py', 'w') as f:
++        f.write('#!/usr/bin/env python\nif __name__ == "__main__":\n    from django.core.management import execute_from_command_line\n    execute_from_command_line(sys.argv)')
++
++    # Make migrations
++    call_command('makemigrations', 'testapp', interactive=False)
++
++    # Squash migrations
++    call_command('squashmigrations', 'testapp', '0001', interactive=False)
++
++    # Apply migrations
++    call_command('migrate', 'testapp', interactive=False)
++
++    # Unapply the squashed migration
++    call_command('migrate', 'testapp', 'zero', interactive=False)
++
++    # Check if the squashed migration is marked as unapplied
++    from django.db.migrations.executor import MigrationExecutor
++    executor = MigrationExecutor(settings)
++    applied_migrations = executor.loader.applied_migrations
++    squashed_migration = next((m for m in executor.loader.all_migrations if m.name == 'squashed_0001'), None)
++
++    if squashed_migration and squashed_migration in applied_migrations:
++        print("ERROR: Squashed migration is still marked as applied after unapplying.")
++        sys.exit(1)
++    else:
++        print("Squashed migration was correctly marked as unapplied.")
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file
