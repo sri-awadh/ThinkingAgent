@@ -6,11 +6,9 @@ from tqdm import tqdm
 from config.config_loader import load_config
 from llm.llm import LLM
 
-
 def load_jsonl(file_path):
     with open(file_path, 'r') as file:
         return [json.loads(line) for line in file]
-
 
 def save_jsonl(data, file_path):
     """Save data to a JSONL file, ensuring proper line separation."""
@@ -29,26 +27,6 @@ def save_jsonl(data, file_path):
         for entry in data:
             json.dump(entry, file)
             file.write('\n')
-
-
-def format_initial_issue(initial_issue):
-    """Convert the initial issue array into a single formatted string."""
-    return '\n'.join(item['text'] for item in initial_issue)
-
-
-def format_interaction_string(interactions):
-    """Format the list of interactions into a single string.
-    Each interaction has a response and observation field that might contain newlines."""
-    formatted_str = ''
-    for interaction in interactions:
-        # Replace any literal '\n' with actual newlines and escape special characters
-        response = interaction['response'].replace('\\n', '\n')
-        observation = interaction['observation'].replace('\\n', '\n')
-
-        formatted_str += f'RESPONSE:\n{response}\n\n'
-        formatted_str += f'OBSERVATION:\n{observation}\n\n'
-    return formatted_str
-
 
 def create_analysis_prompt(entry):
     """Create prompt focusing on overthinking detection through feedback response analysis"""
@@ -173,7 +151,6 @@ You are an AI judge focused on detecting when models prefer their internal reaso
     """
     return prompt
 
-
 def analyze_single_response(entry, llm: LLM):
     try:
         prompt = create_analysis_prompt(entry)
@@ -217,39 +194,32 @@ def analyze_single_response(entry, llm: LLM):
         traceback.print_exc()
         return None, None
 
-
 def load_responses_file(file_path):
     """Load and return the content of a responses_observations.txt file"""
     with open(file_path, 'r') as f:
         return f.read()
 
-
-# Add selected IDs list
-selected_ids = [ "astropy__astropy-13236", "astropy__astropy-13398", "astropy__astropy-13579", "astropy__astropy-13977", "astropy__astropy-14182", "astropy__astropy-14598", "astropy__astropy-14995", "astropy__astropy-7166", "astropy__astropy-8707", "django__django-10914", "django__django-10999", "django__django-11099", "django__django-11206", "django__django-11292", "django__django-11490", "django__django-11555", "django__django-11603", "django__django-11734", "django__django-11740", "django__django-11790", "django__django-11848", "django__django-11964", "django__django-12125", "django__django-12209", "django__django-12308", "django__django-12406", "django__django-12713", "django__django-12774", "django__django-12858", "django__django-12965", "django__django-13112", "django__django-13195", "django__django-13212", "django__django-13346", "django__django-13363", "django__django-13449", "django__django-13516", "django__django-13670", "django__django-13741", "django__django-13809", "django__django-13810", "django__django-13821", "django__django-13837", "django__django-14034", "django__django-14089", "django__django-14155", "django__django-14349", "django__django-14373", "django__django-14376", "django__django-14500", "django__django-14608", "django__django-14631", "django__django-14725", "django__django-14752", "django__django-14765", "django__django-14771", "django__django-15037", "django__django-15103", "django__django-15128", "django__django-15268", "django__django-15277", "django__django-15368", "django__django-15375", "django__django-15525", "django__django-15561", "django__django-15563", "django__django-15572", "django__django-15731", "django__django-15741", "django__django-15814", "django__django-15916", "django__django-15957", "django__django-15973", "django__django-16082", "django__django-16100", "django__django-16256", "django__django-16315", "django__django-16333", "django__django-16429", "django__django-16485", "django__django-16493", "django__django-16502", "django__django-16595", "django__django-16612", "django__django-16642", "django__django-16661", "django__django-16667", "django__django-16819", "django__django-16899", "django__django-16938", "django__django-16950", "django__django-17029", "matplotlib__matplotlib-13989", "matplotlib__matplotlib-20676", "matplotlib__matplotlib-20826", "matplotlib__matplotlib-21568", "matplotlib__matplotlib-22865", "matplotlib__matplotlib-22871", "matplotlib__matplotlib-23412", "matplotlib__matplotlib-24149", "matplotlib__matplotlib-24570", "matplotlib__matplotlib-24637", "matplotlib__matplotlib-24970", "matplotlib__matplotlib-25122", "matplotlib__matplotlib-25287", "matplotlib__matplotlib-25775", "matplotlib__matplotlib-25960", "matplotlib__matplotlib-26113", "matplotlib__matplotlib-26342", "mwaskom__seaborn-3069", "psf__requests-1766", "psf__requests-5414", "psf__requests-6028", "pydata__xarray-3095", "pydata__xarray-3151", "pydata__xarray-3305", "pydata__xarray-3993", "pydata__xarray-4075", "pydata__xarray-4966", "pydata__xarray-6599", "pydata__xarray-6938", "pylint-dev__pylint-4661", "pylint-dev__pylint-6386", "pylint-dev__pylint-7080", "pylint-dev__pylint-8898", "pytest-dev__pytest-10356", "pytest-dev__pytest-5262", "pytest-dev__pytest-5787", "pytest-dev__pytest-6197", "pytest-dev__pytest-7236", "pytest-dev__pytest-7324", "pytest-dev__pytest-7571", "scikit-learn__scikit-learn-10297", "scikit-learn__scikit-learn-10908", "scikit-learn__scikit-learn-12973", "scikit-learn__scikit-learn-13142", "scikit-learn__scikit-learn-14141", "scikit-learn__scikit-learn-14894", "scikit-learn__scikit-learn-25102", "scikit-learn__scikit-learn-25232", "scikit-learn__scikit-learn-25747", "scikit-learn__scikit-learn-25931", "sphinx-doc__sphinx-10449", "sphinx-doc__sphinx-10466", "sphinx-doc__sphinx-10614", "sphinx-doc__sphinx-7440", "sphinx-doc__sphinx-7454", "sphinx-doc__sphinx-7462", "sphinx-doc__sphinx-7748", "sphinx-doc__sphinx-7910", "sphinx-doc__sphinx-8035", "sphinx-doc__sphinx-8056", "sphinx-doc__sphinx-8269", "sphinx-doc__sphinx-8459", "sphinx-doc__sphinx-8548", "sphinx-doc__sphinx-8551", "sphinx-doc__sphinx-8593", "sphinx-doc__sphinx-8638", "sphinx-doc__sphinx-9367", "sphinx-doc__sphinx-9591", "sphinx-doc__sphinx-9602", "sphinx-doc__sphinx-9658", "sphinx-doc__sphinx-9673", "sympy__sympy-11618", "sympy__sympy-12096", "sympy__sympy-12419", "sympy__sympy-12481", "sympy__sympy-12489", "sympy__sympy-13372", "sympy__sympy-13480", "sympy__sympy-13551", "sympy__sympy-13647", "sympy__sympy-13798", "sympy__sympy-13974", "sympy__sympy-14531", "sympy__sympy-14711", "sympy__sympy-15017", "sympy__sympy-15599", "sympy__sympy-15809", "sympy__sympy-15875", "sympy__sympy-16450", "sympy__sympy-17630", "sympy__sympy-17655", "sympy__sympy-18189", "sympy__sympy-18199", "sympy__sympy-18763", "sympy__sympy-19783", "sympy__sympy-19954", "sympy__sympy-20154", "sympy__sympy-20438", "sympy__sympy-20590", "sympy__sympy-21379", "sympy__sympy-21612", "sympy__sympy-21847", "sympy__sympy-21930", "sympy__sympy-22080", "sympy__sympy-22714", "sympy__sympy-23413", "sympy__sympy-24443", "sympy__sympy-24562"]
-
-
 def find_responses_files(base_path):
     """Find all responses_observations.txt files and return their paths along with metadata"""
     responses_files = []
 
-    # Walk through all directories under the base path
+    # Walk through all directories
     for root, _, files in os.walk(base_path):
-        if 'responses_observations.txt' in files:
-            # Extract issue ID from path - it's the last directory name
-            path_parts = root.split(os.sep)
-            issue = path_parts[-1]  # Last directory is the issue
-            
-            # Only process if it's one of our selected issues
-            if issue in selected_ids:
+        for file in files:
+            if file == 'responses_observations.txt':
+                file_path = os.path.join(root, file)
+                
+                # Extract model and issue_id from path
+                path_parts = root.split(os.sep)
                 try:
-                    # Extract model name using outputs as reference
                     model_idx = path_parts.index('outputs') + 2  # Model name is 2 after 'outputs'
+                    issue_id = path_parts[-1]  # Last part is issue_id
                     model = path_parts[model_idx]
                     
                     responses_files.append({
-                        'file_path': os.path.join(root, 'responses_observations.txt'),
+                        'file_path': file_path,
                         'model': model,
-                        'issue_id': issue,
+                        'issue_id': issue_id
                     })
                 except (ValueError, IndexError):
                     print(f'Warning: Could not parse metadata from path: {root}')
@@ -257,15 +227,12 @@ def find_responses_files(base_path):
 
     return responses_files
 
-
-def load_existing_results(file_path):
-    """Load existing analysis results and create a lookup dictionary."""
+def load_existing_results(output_file):
+    """Load existing results from output file to avoid reprocessing"""
     existing_results = {}
-    if os.path.exists(file_path):
+    if os.path.exists(output_file):
         try:
-            results = load_jsonl(file_path)
-            for result in results:
-                # Create a unique key combining model and full issue path
+            for result in load_jsonl(output_file):
                 key = (result['model'], result['issue_id'])
                 existing_results[key] = result
         except Exception as e:
@@ -273,11 +240,10 @@ def load_existing_results(file_path):
             print('Continuing with empty results cache')
     return existing_results
 
-
 def analyze_responses(base_path, iteration_number=None):
     """
     Analyze responses and save results. Can handle both iteration and non-iteration modes.
-    
+
     Args:
         base_path: Base directory path to search for response files
         iteration_number: If provided, runs in iteration mode with specific numbering
@@ -287,10 +253,10 @@ def analyze_responses(base_path, iteration_number=None):
     llm = LLM(config)
 
     # Determine output files based on mode
-    output_file = (f'analysis_results_overthinking_iteration{iteration_number}.jsonl' 
-                  if iteration_number is not None 
+    output_file = (f'analysis_results_overthinking_iteration{iteration_number}.jsonl'
+                  if iteration_number is not None
                   else 'analysis_results.jsonl')
-    
+
     interpretation_file = (f'overthinking_interpretations_iteration{iteration_number}.txt'
                          if iteration_number is not None
                          else 'overthinking_interpretations.txt')
@@ -300,7 +266,7 @@ def analyze_responses(base_path, iteration_number=None):
 
     # Find all response files
     response_files = find_responses_files(base_path)
-    print(f"Found {len(response_files)} total files" + 
+    print(f"Found {len(response_files)} total files" +
           (f" for iteration {iteration_number}" if iteration_number is not None else ""))
 
     # Filter out already analyzed files
@@ -345,18 +311,17 @@ def analyze_responses(base_path, iteration_number=None):
             except Exception as e:
                 print(f'Task failed: {e}')
 
-
 if __name__ == '__main__':
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='Analyze overthinking in model responses')
-    parser.add_argument('--iterations-mode', action='store_true', 
+    parser.add_argument('--iterations-mode', action='store_true',
                        help='Enable iterations mode to analyze multiple iterations')
     args = parser.parse_args()
 
     if args.iterations_mode:
         base_path_template = 'evaluation/evaluation_outputs/outputs/paper/CodeActAgent/best_of_n_o1/iteration_{}'
-        
+
         # Process iterations 1 through 4
         for iteration in range(1, 5):
             current_base_path = base_path_template.format(iteration)
