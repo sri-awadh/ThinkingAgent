@@ -1,8 +1,8 @@
 <div align="center">
 
-# Overthinking
+# AgentThink
 
-[![Github](https://img.shields.io/badge/Overthinking-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/AlexCuadron/Overthinking) [![arXiv](https://img.shields.io/badge/arXiv-2502.08235-b31b1b.svg?style=for-the-badge)](https://arxiv.org/abs/2502.08235)
+[![Github](https://img.shields.io/badge/AgentThink-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/AlexCuadron/AgentThink) [![arXiv](https://img.shields.io/badge/arXiv-2502.08235-b31b1b.svg?style=for-the-badge)](https://arxiv.org/abs/2502.08235)
 
 <div align="center" style="font-family: Arial, sans-serif;">
   <p>
@@ -18,7 +18,7 @@
 
 # Overview
 
-Overthinking is a systematic evaluation framework that automatically rates overthinking behavior in large language models. The framework focuses on detecting when models prefer their internal reasoning chain over interacting with the environment, a critical issue in agentic tasks.
+AgentThink is a systematic evaluation framework that automatically rates overthinking behavior in large language models. The framework focuses on detecting when models prefer their internal reasoning chain over interacting with the environment, a critical issue in agentic tasks.
 
 The framework evaluates three key aspects of overthinking:
 1. **Analysis Paralysis**: When models focus on heavy planning instead of interacting with the environment
@@ -30,15 +30,15 @@ The framework evaluates three key aspects of overthinking:
 First, clone the repository and install the required packages:
 
 ```shell
-git clone https://github.com/AlexCuadron/Overthinking.git
-cd Overthinking
+git clone https://github.com/AlexCuadron/AgentThink.git
+cd AgentThink
 pip install -r requirements.txt
 ```
 
 The framework consists of two main components:
 
 1. `format_message.py`: Processes and formats interaction logs into a standardized format
-2. `analyze_overthinking.py`: Analyzes the formatted interactions and produces overthinking scores
+2. `analyze_agent_think.py`: Analyzes the formatted interactions and produces overthinking scores
 
 ## Configuration
 
